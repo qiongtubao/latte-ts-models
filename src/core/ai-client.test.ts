@@ -1,11 +1,15 @@
 import { AIClient } from './ai-client';
-import { UsageStats, ProviderConfig } from '../types/types';
+import { UsageStats, ProviderConfig, ChatMessage, ChatResponse } from '../types/types';
 import { loadProviders } from '../config/config';
 import { extractJson } from '../utils/json-extractor';
+import { executeWithRetry } from '../utils/retry';
+import Anthropic from '@anthropic-ai/sdk';
 
 // Mock dependencies
 jest.mock('../config/config');
 jest.mock('../utils/json-extractor');
+jest.mock('../utils/retry');
+jest.mock('@anthropic-ai/sdk');
 
 describe('AIClient', () => {
   // Mock 配置
@@ -18,10 +22,22 @@ describe('AIClient', () => {
     },
   };
 
+  // Mock Anthropic 客户端
+  const mockAnthropicCreate = jest.fn();
+  const mockAnthropicConstructor = jest.fn().mockImplementation(() => ({
+    messages: {
+      create: mockAnthropicCreate,
+    },
+  }));
+
   beforeEach(() => {
     // 重置 mocks
     jest.clearAllMocks();
     (loadProviders as jest.Mock).mockReturnValue(mockProviders);
+    (Anthropic as unknown as jest.Mock).mockImplementation(mockAnthropicConstructor);
+
+    // 默认 executeWithRetry 直接执行函数
+    (executeWithRetry as jest.Mock).mockImplementation(async (fn: () => Promise<any>) => fn());
   });
 
   describe('constructor', () => {
@@ -229,6 +245,313 @@ describe('AIClient', () => {
         calls: 1,
         inputTokens: 200,
         outputTokens: 100,
+      });
+    });
+  });
+
+  describe('query', () => {
+    it('应该发送单轮查询并返回文本', async () => {
+      // Mock API 响应
+      mockAnthropicCreate.mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'Hello, I am Claude.' }],
+        stop_reason: 'end_turn',
+        model: 'claude-sonnet-4-20250514',
+        usage: { input_tokens: 10, output_tokens: 20 },
+      });
+
+      const client = new AIClient();
+      const result = await client.query('Hello');
+
+      // 验证返回文本
+      expect(result).toBe('Hello, I am Claude.');
+
+      // 验证 API 调用参数
+      expect(mockAnthropicCreate).toHaveBeenCalledWith({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 4096,
+        messages: [{ role: 'user', content: 'Hello' }],
+      });
+
+      // 验证使用了重试机制
+      expect(executeWithRetry).toHaveBeenCalled();
+    });
+
+    it('应该支持自定义选项', async () => {
+      mockAnthropicCreate.mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'Response' }],
+        stop_reason: 'end_turn',
+        model: 'claude-sonnet-4-20250514',
+        usage: { input_tokens: 10, output_tokens: 20 },
+      });
+
+      const client = new AIClient();
+      const result = await client.query('Hello', {
+        model: 'anthropic/claude-sonnet-4-20250514',
+        maxTokens: 2048,
+        systemPrompt: 'You are a helpful assistant.',
+      });
+
+      expect(result).toBe('Response');
+
+      // 验证 API 调用包含系统提示词
+      expect(mockAnthropicCreate).toHaveBeenCalledWith({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 2048,
+        system: 'You are a helpful assistant.',
+        messages: [{ role: 'user', content: 'Hello' }],
+      });
+    });
+
+    it('应该更新用量统计', async () => {
+      mockAnthropicCreate.mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'Response' }],
+        stop_reason: 'end_turn',
+        model: 'claude-sonnet-4-20250514',
+        usage: { input_tokens: 100, output_tokens: 50 },
+      });
+
+      const client = new AIClient();
+      await client.query('Hello');
+
+      const stats = client.getUsageStats();
+      expect(stats.totalCalls).toBe(1);
+      expect(stats.successCalls).toBe(1);
+      expect(stats.totalInputTokens).toBe(100);
+      expect(stats.totalOutputTokens).toBe(50);
+      expect(stats.totalTokens).toBe(150);
+    });
+
+    it('应该处理 API 错误', async () => {
+      const error = new Error('API Error');
+      mockAnthropicCreate.mockRejectedValueOnce(error);
+
+      const client = new AIClient();
+
+      await expect(client.query('Hello')).rejects.toThrow('API Error');
+
+      // 验证失败统计
+      const stats = client.getUsageStats();
+      expect(stats.failedCalls).toBe(1);
+    });
+
+    it('应该支持自定义 logger', async () => {
+      mockAnthropicCreate.mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'Response' }],
+        stop_reason: 'end_turn',
+        model: 'claude-sonnet-4-20250514',
+        usage: { input_tokens: 10, output_tokens: 20 },
+      });
+
+      const logger = {
+        debug: jest.fn(),
+        info: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn(),
+      };
+
+      const client = new AIClient();
+      await client.query('Hello', {}, logger);
+
+      // 验证 logger 被调用
+      expect(logger.debug).toHaveBeenCalled();
+    });
+  });
+
+  describe('chat', () => {
+    it('应该发送多轮对话并返回完整响应', async () => {
+      const messages: ChatMessage[] = [
+        { role: 'user', content: 'Hello' },
+        { role: 'assistant', content: 'Hi there!' },
+        { role: 'user', content: 'How are you?' },
+      ];
+
+      mockAnthropicCreate.mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'I am doing well!' }],
+        stop_reason: 'end_turn',
+        model: 'claude-sonnet-4-20250514',
+        usage: { input_tokens: 30, output_tokens: 10 },
+      });
+
+      const client = new AIClient();
+      const response: ChatResponse = await client.chat(messages);
+
+      // 验证响应结构
+      expect(response.text).toBe('I am doing well!');
+      expect(response.stopReason).toBe('end_turn');
+      expect(response.model).toBe('claude-sonnet-4-20250514');
+      expect(response.usage).toEqual({ inputTokens: 30, outputTokens: 10 });
+
+      // 验证 API 调用参数
+      expect(mockAnthropicCreate).toHaveBeenCalledWith({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 4096,
+        messages: messages,
+      });
+    });
+
+    it('应该支持自定义选项', async () => {
+      const messages: ChatMessage[] = [
+        { role: 'user', content: 'Hello' },
+      ];
+
+      mockAnthropicCreate.mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'Response' }],
+        stop_reason: 'max_tokens',
+        model: 'claude-sonnet-4-20250514',
+        usage: { input_tokens: 10, output_tokens: 20 },
+      });
+
+      const client = new AIClient();
+      const response = await client.chat(messages, {
+        model: 'anthropic/claude-sonnet-4-20250514',
+        maxTokens: 1024,
+        systemPrompt: 'You are a helpful assistant.',
+      });
+
+      expect(response.stopReason).toBe('max_tokens');
+
+      // 验证 API 调用包含自定义选项
+      expect(mockAnthropicCreate).toHaveBeenCalledWith({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1024,
+        system: 'You are a helpful assistant.',
+        messages: messages,
+      });
+    });
+
+    it('应该更新用量统计', async () => {
+      const messages: ChatMessage[] = [
+        { role: 'user', content: 'Hello' },
+      ];
+
+      mockAnthropicCreate.mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'Response' }],
+        stop_reason: 'end_turn',
+        model: 'claude-sonnet-4-20250514',
+        usage: { input_tokens: 50, output_tokens: 30 },
+      });
+
+      const client = new AIClient();
+      await client.chat(messages);
+
+      const stats = client.getUsageStats();
+      expect(stats.totalCalls).toBe(1);
+      expect(stats.successCalls).toBe(1);
+      expect(stats.totalInputTokens).toBe(50);
+      expect(stats.totalOutputTokens).toBe(30);
+    });
+
+    it('应该处理 API 错误', async () => {
+      const messages: ChatMessage[] = [
+        { role: 'user', content: 'Hello' },
+      ];
+
+      const error = new Error('API Error');
+      mockAnthropicCreate.mockRejectedValueOnce(error);
+
+      const client = new AIClient();
+
+      await expect(client.chat(messages)).rejects.toThrow('API Error');
+
+      const stats = client.getUsageStats();
+      expect(stats.failedCalls).toBe(1);
+    });
+
+    it('应该支持自定义 logger', async () => {
+      const messages: ChatMessage[] = [
+        { role: 'user', content: 'Hello' },
+      ];
+
+      mockAnthropicCreate.mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'Response' }],
+        stop_reason: 'end_turn',
+        model: 'claude-sonnet-4-20250514',
+        usage: { input_tokens: 10, output_tokens: 20 },
+      });
+
+      const logger = {
+        debug: jest.fn(),
+        info: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn(),
+      };
+
+      const client = new AIClient();
+      await client.chat(messages, {}, logger);
+
+      expect(logger.debug).toHaveBeenCalled();
+    });
+  });
+
+  describe('resolveModel (private method)', () => {
+    it('应该解析默认模型', () => {
+      const client = new AIClient();
+      const clientAny = client as any;
+
+      const result = clientAny.resolveModel();
+
+      expect(result).toEqual({
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-20250514',
+      });
+    });
+
+    it('应该解析 provider/model 格式', () => {
+      const client = new AIClient();
+      const clientAny = client as any;
+
+      const result = clientAny.resolveModel('anthropic/claude-sonnet-4-20250514');
+
+      expect(result).toEqual({
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-20250514',
+      });
+    });
+
+    it('应该解析仅模型名格式', () => {
+      const client = new AIClient();
+      const clientAny = client as any;
+
+      const result = clientAny.resolveModel('claude-sonnet-4-20250514');
+
+      expect(result).toEqual({
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-20250514',
+      });
+    });
+
+    it('应该抛出错误当 provider 不存在', () => {
+      const client = new AIClient();
+      const clientAny = client as any;
+
+      expect(() => clientAny.resolveModel('unknown/model')).toThrow('Provider not found: unknown');
+    });
+
+    it('应该抛出错误当模型不在 provider 中', () => {
+      const client = new AIClient();
+      const clientAny = client as any;
+
+      expect(() => clientAny.resolveModel('anthropic/unknown-model')).toThrow(
+        'Model unknown-model not found in provider anthropic'
+      );
+    });
+  });
+
+  describe('createAnthropicClient (private method)', () => {
+    it('应该创建 Anthropic 客户端', () => {
+      const client = new AIClient();
+      const clientAny = client as any;
+
+      const config = {
+        baseURL: 'https://api.anthropic.com',
+        authToken: 'test-key',
+      };
+
+      const anthropicClient = clientAny.createAnthropicClient(config);
+
+      expect(Anthropic).toHaveBeenCalledWith({
+        baseURL: config.baseURL,
+        apiKey: config.authToken,
       });
     });
   });
