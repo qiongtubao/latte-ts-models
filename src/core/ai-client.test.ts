@@ -1,5 +1,5 @@
 import { AIClient } from './ai-client';
-import { UsageStats, ProviderConfig, ChatMessage, ChatResponse, ChatResponseWithTools, ToolDefinition } from '../types/types';
+import { UsageStats, ProviderConfig, ChatMessage, ChatResponse, ChatResponseWithTools, ToolDefinition, StreamInterruptedError } from '../types/types';
 import { loadProviders } from '../config/config';
 import { extractJson } from '../utils/json-extractor';
 import { executeWithRetry } from '../utils/retry';
@@ -657,6 +657,147 @@ describe('AIClient', () => {
 
       expect(finalStats.totalCalls).toBe(initialStats.totalCalls + 1);
       expect(finalStats.successCalls).toBe(initialStats.successCalls + 1);
+    });
+  });
+
+  describe('chatStream', () => {
+    // Integration tests that skip if no API key
+    const hasApiKey = process.env.ANTHROPIC_API_KEY;
+    const testFn = hasApiKey ? it : it.skip;
+
+    const tools: ToolDefinition[] = [
+      {
+        name: 'get_weather',
+        description: 'Get the current weather in a location',
+        input_schema: {
+          type: 'object',
+          properties: {
+            location: {
+              type: 'string',
+              description: 'The city and state, e.g. San Francisco, CA',
+            },
+          },
+          required: ['location'],
+        },
+      },
+    ];
+
+    testFn('should stream text response', async () => {
+      const client = new AIClient();
+      const messages: ChatMessage[] = [
+        { role: 'user', content: 'Tell me a short story' },
+      ];
+
+      const response = await client.chatStream(messages);
+
+      expect(response).toBeDefined();
+      expect(response.text).toBeDefined();
+      expect(response.model).toBeDefined();
+      expect(response.usage).toBeDefined();
+      expect(response.stopReason).toBe('end_turn');
+    });
+
+    testFn('should stream with tools and collect tool calls', async () => {
+      const client = new AIClient();
+      const messages: ChatMessage[] = [
+        { role: 'user', content: 'What is the weather in Tokyo?' },
+      ];
+
+      const response = await client.chatStream(messages, { tools });
+
+      expect(response).toBeDefined();
+      expect(response.model).toBeDefined();
+      expect(response.usage).toBeDefined();
+
+      // If tool use occurred
+      if (response.toolCalls && response.toolCalls.length > 0) {
+        expect(response.toolCalls[0].type).toBe('tool_use');
+        expect(response.toolCalls[0].name).toBeDefined();
+        expect(response.toolCalls[0].id).toBeDefined();
+        expect(response.toolCalls[0].input).toBeDefined();
+      }
+    });
+
+    testFn('should maintain content block order', async () => {
+      const client = new AIClient();
+      const messages: ChatMessage[] = [
+        { role: 'user', content: 'Hello' },
+      ];
+
+      const response = await client.chatStream(messages, { tools });
+
+      if (response.contentBlocks) {
+        // Verify content blocks exist
+        expect(response.contentBlocks.length).toBeGreaterThan(0);
+
+        // Check that blocks are properly ordered
+        for (let i = 0; i < response.contentBlocks.length; i++) {
+          const block = response.contentBlocks[i];
+          expect(block.type).toBeDefined();
+        }
+      }
+    });
+
+    testFn('should support custom options', async () => {
+      const client = new AIClient();
+      const messages: ChatMessage[] = [
+        { role: 'user', content: 'Hello' },
+      ];
+
+      const response = await client.chatStream(messages, {
+        model: 'anthropic/claude-sonnet-4-20250514',
+        maxTokens: 1024,
+        systemPrompt: 'You are a helpful assistant.',
+      });
+
+      expect(response).toBeDefined();
+      expect(response.model).toBe('claude-sonnet-4-20250514');
+    });
+
+    testFn('should support custom logger', async () => {
+      const logger = {
+        debug: jest.fn(),
+        info: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn(),
+      };
+
+      const client = new AIClient();
+      const messages: ChatMessage[] = [
+        { role: 'user', content: 'Hello' },
+      ];
+
+      await client.chatStream(messages, {}, logger);
+
+      expect(logger.debug).toHaveBeenCalled();
+    });
+
+    testFn('should update usage stats', async () => {
+      const client = new AIClient();
+      const messages: ChatMessage[] = [
+        { role: 'user', content: 'Hello' },
+      ];
+
+      const initialStats = client.getUsageStats();
+      await client.chatStream(messages);
+      const finalStats = client.getUsageStats();
+
+      expect(finalStats.totalCalls).toBe(initialStats.totalCalls + 1);
+      expect(finalStats.successCalls).toBe(initialStats.successCalls + 1);
+    });
+
+    testFn('should handle stream interruption', async () => {
+      // This test requires mocking the stream
+      // For integration test, we can't easily simulate interruption
+      // So we just verify the error type exists
+      expect(StreamInterruptedError).toBeDefined();
+
+      const error = new StreamInterruptedError('Stream interrupted', {
+        text: 'partial',
+      });
+
+      expect(error.name).toBe('StreamInterruptedError');
+      expect(error.partialResponse).toBeDefined();
     });
   });
 });

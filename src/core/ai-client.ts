@@ -1,4 +1,4 @@
-import { UsageStats, Usage, ProviderConfig, ChatMessage, ChatResponse, ChatOptions, Logger, ChatResponseWithTools, ToolDefinition, ToolUseBlock, ContentBlock } from '../types/types';
+import { UsageStats, Usage, ProviderConfig, ChatMessage, ChatResponse, ChatOptions, Logger, ChatResponseWithTools, ToolDefinition, ToolUseBlock, ContentBlock, StreamInterruptedError } from '../types/types';
 import { loadProviders, LoadProvidersOptions } from '../config/config';
 import { extractJson as extractJsonUtil } from '../utils/json-extractor';
 import { executeWithRetry } from '../utils/retry';
@@ -506,6 +506,206 @@ export class AIClient {
 
       // 更新失败统计
       this.incrementFailedCalls();
+
+      throw error;
+    }
+  }
+
+  /**
+   * 流式对话（支持 Tool Use）
+   *
+   * @param messages - 对话消息列表
+   * @param options - 对话选项（包含工具定义）
+   * @param logger - 可选的日志记录器
+   * @returns 包含工具调用的对话响应
+   */
+  async chatStream(
+    messages: ChatMessage[],
+    options?: ChatOptions,
+    logger?: Logger
+  ): Promise<ChatResponseWithTools> {
+    logger?.debug('Starting chatStream', { messages, options });
+
+    // 解析模型
+    const { provider, model } = this.resolveModel(options?.model);
+    logger?.debug('Resolved model', { provider, model });
+
+    // 获取客户端
+    const client = this.getOrCreateClient(provider);
+
+    // 构建请求参数
+    const requestParams: Anthropic.Messages.MessageCreateParams = {
+      model,
+      max_tokens: options?.maxTokens ?? this.DEFAULT_MAX_TOKENS,
+      messages: messages.map(msg => ({
+        role: msg.role,
+        content: this.convertContentToAnthropic(msg.content),
+      })),
+    };
+
+    // 添加系统提示词
+    if (options?.systemPrompt) {
+      requestParams.system = options.systemPrompt;
+    }
+
+    // 添加工具定义
+    if (options?.tools && options.tools.length > 0) {
+      requestParams.tools = options.tools.map(tool => ({
+        name: tool.name,
+        description: tool.description,
+        input_schema: tool.input_schema,
+      }));
+    }
+
+    // 添加工具选择策略
+    if (options?.toolChoice) {
+      if (typeof options.toolChoice === 'string') {
+        requestParams.tool_choice = { type: options.toolChoice };
+      } else {
+        requestParams.tool_choice = options.toolChoice;
+      }
+    }
+
+    logger?.debug('Starting streaming API call', { requestParams });
+
+    // 用于累积数据
+    const contentBlocks: ContentBlock[] = [];
+    const partialResponse: Partial<ChatResponseWithTools> = {};
+
+    try {
+      // 创建流式请求
+      const stream = await client.messages.stream(requestParams);
+
+      // 处理流事件
+      for await (const event of stream) {
+        logger?.debug('Stream event', { event });
+
+        if (event.type === 'content_block_start') {
+          const block = event.content_block;
+          if (block.type === 'text') {
+            contentBlocks.push({
+              type: 'text',
+              text: '',
+            });
+          } else if (block.type === 'tool_use') {
+            contentBlocks.push({
+              type: 'tool_use',
+              id: block.id,
+              name: block.name,
+              input: {},
+            });
+          }
+        } else if (event.type === 'content_block_delta') {
+          const index = event.index;
+          const delta = event.delta;
+
+          if (delta.type === 'text_delta' && contentBlocks[index]) {
+            const textBlock = contentBlocks[index] as { type: 'text'; text: string };
+            textBlock.text += delta.text;
+          } else if (delta.type === 'input_json_delta' && contentBlocks[index]) {
+            const toolBlock = contentBlocks[index] as ToolUseBlock;
+            // 累积 JSON 输入（partial_json 字段包含部分 JSON）
+            try {
+              // Note: SDK provides partial JSON string that needs to be accumulated
+              // For now, we'll parse the final input from finalMessage
+              logger?.debug('Partial JSON received', { partialJson: delta.partial_json });
+            } catch (e) {
+              logger?.warn('Failed to process partial JSON', { e });
+            }
+          }
+        } else if (event.type === 'content_block_stop') {
+          logger?.debug('Content block stopped', { index: event.index });
+        }
+      }
+
+      // 获取最终消息
+      const finalMessage = await stream.finalMessage();
+
+      logger?.debug('Stream completed', { finalMessage });
+
+      // 从 finalMessage 中提取完整的内容块（替换部分累积的数据）
+      const finalContentBlocks: ContentBlock[] = finalMessage.content.map(block => {
+        if (block.type === 'text') {
+          const textBlock = block as Anthropic.Messages.TextBlock;
+          return {
+            type: 'text' as const,
+            text: textBlock.text,
+          };
+        } else if (block.type === 'tool_use') {
+          const toolBlock = block as Anthropic.Messages.ToolUseBlock;
+          return {
+            type: 'tool_use' as const,
+            id: toolBlock.id,
+            name: toolBlock.name,
+            input: toolBlock.input as Record<string, any>,
+          };
+        }
+        throw new Error(`Unsupported content block type: ${block.type}`);
+      });
+
+      // 提取文本内容
+      const textContent = finalContentBlocks
+        .filter(block => block.type === 'text')
+        .map(block => (block as { type: 'text'; text: string }).text)
+        .join('');
+
+      // 提取工具调用
+      const toolCalls: ToolUseBlock[] = finalContentBlocks.filter(
+        block => block.type === 'tool_use'
+      ) as ToolUseBlock[];
+
+      // 转换用量统计
+      const usage: Usage = {
+        inputTokens: finalMessage.usage.input_tokens,
+        outputTokens: finalMessage.usage.output_tokens,
+      };
+
+      // 更新统计
+      this.updateUsageStats(model, usage);
+      this.incrementSuccessCalls();
+
+      // 构建响应
+      const chatResponse: ChatResponseWithTools = {
+        text: textContent,
+        stopReason: finalMessage.stop_reason,
+        model: finalMessage.model,
+        usage,
+        contentBlocks: finalContentBlocks,
+        toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      };
+
+      logger?.info('ChatStream completed', {
+        model,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        toolCallsCount: toolCalls.length,
+      });
+
+      return chatResponse;
+    } catch (error) {
+      logger?.error('ChatStream failed', { error });
+
+      // 更新失败统计
+      this.incrementFailedCalls();
+
+      // 如果有部分数据，创建中断错误
+      if (contentBlocks.length > 0) {
+        const partialText = contentBlocks
+          .filter(block => block.type === 'text')
+          .map(block => (block as { type: 'text'; text: string }).text)
+          .join('');
+
+        partialResponse.text = partialText;
+        partialResponse.contentBlocks = contentBlocks;
+        partialResponse.toolCalls = contentBlocks.filter(
+          block => block.type === 'tool_use'
+        ) as ToolUseBlock[];
+
+        throw new StreamInterruptedError(
+          'Stream interrupted',
+          partialResponse
+        );
+      }
 
       throw error;
     }
