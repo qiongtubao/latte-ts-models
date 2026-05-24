@@ -9,26 +9,27 @@ A multi-provider AI client library built on the Anthropic SDK, providing a unifi
 - **Exponential Backoff** - `500ms * 2^n + jitter` algorithm with 24-hour maximum
 - **JSON Extraction** - Handles markdown code blocks, trailing commas, and comments in LLM output
 - **Multiple Configuration Methods** - Direct config, config files, or environment variables
-- **Tool Use Support** - Streaming mode Tool Use API to avoid 10-minute timeout warnings
+- **Tool Use Support** ✨ NEW - Full support for Anthropic's Tool Use API with manual loop control
+- **Streaming Responses** ✨ NEW - Real-time streaming with event-based callbacks
 - **Usage Statistics** - Automatic tracking of call counts and token consumption
 
 ## Installation
 
-```bash
+\`\`\`bash
 npm install latte-ts-models
-```
+\`\`\`
 
 ### Dependencies
 
-This package requires `@anthropic-ai/sdk` as a peer dependency:
+This package requires \`@anthropic-ai/sdk\` as a peer dependency:
 
-```bash
+\`\`\`bash
 npm install @anthropic-ai/sdk
-```
+\`\`\`
 
 ## Quick Start
 
-```typescript
+\`\`\`typescript
 import { AIClient } from 'latte-ts-models';
 
 // Method 1: Direct configuration (recommended)
@@ -62,7 +63,85 @@ const response = await ai.chat([
 
 // Specify provider and model
 const result = await ai.query('hello', { model: 'aiproxy/glm-5.1' });
-```
+\`\`\`
+
+### Tool Use Example
+
+\`\`\`typescript
+import { AIClient, ToolDefinition } from 'latte-ts-models';
+
+const ai = new AIClient({ /* config */ });
+
+// Define tools
+const tools: ToolDefinition[] = [
+  {
+    name: 'get_weather',
+    description: 'Get current weather for a city',
+    input_schema: {
+      type: 'object',
+      properties: {
+        city: { type: 'string', description: 'City name' }
+      },
+      required: ['city']
+    }
+  }
+];
+
+// Initial message
+const messages = [
+  { role: 'user', content: 'What\'s the weather in Beijing?' }
+];
+
+// Call with tools
+let response = await ai.chatWithTools(messages, { tools });
+
+// Handle tool calls
+while (response.toolCalls && response.toolCalls.length > 0) {
+  for (const toolCall of response.toolCalls) {
+    // Execute tool
+    const result = await executeTool(toolCall.name, toolCall.input);
+
+    // Add assistant message
+    messages.push({
+      role: 'assistant',
+      content: response.contentBlocks!
+    });
+
+    // Add tool result
+    messages.push(AIClient.buildToolResultMessage(toolCall.id, result));
+  }
+
+  // Continue conversation
+  response = await ai.chatWithTools(messages, { tools });
+}
+
+console.log(response.text);
+\`\`\`
+
+### Streaming Example
+
+\`\`\`typescript
+const response = await ai.chatStream(
+  messages,
+  { tools },
+  (event) => {
+    switch (event.type) {
+      case 'text':
+        process.stdout.write(event.delta);
+        break;
+      case 'tool_use_start':
+        console.log(\`\nCalling tool: \${event.toolName}\`);
+        break;
+      case 'tool_use_input':
+        // Show partial tool parameters in real-time
+        break;
+      case 'tool_use_end':
+        console.log(\`\nTool \${event.toolName} ready to execute\`);
+        break;
+    }
+  }
+);
+\`\`\`
 
 ## Documentation
 
@@ -78,25 +157,59 @@ See [latte.md](./latte.md) for full documentation.
 
 ## API Reference
 
-### `AIClient`
+### \`AIClient\`
 
 The main client class for interacting with AI providers.
 
 #### Constructor
 
-```typescript
+\`\`\`typescript
 new AIClient(config?: AIClientConfig)
-```
+\`\`\`
 
 #### Methods
 
-- `query(message: string, options?: QueryOptions): Promise<string>` - Single query
-- `chat(messages: Message[], options?: ChatOptions): Promise<string>` - Multi-turn conversation
-- `getUsage(): UsageStats` - Get usage statistics
+- \`query(message: string, options?: QueryOptions): Promise<string>\` - Single query
+- \`chat(messages: Message[], options?: ChatOptions): Promise<string>\` - Multi-turn conversation
+- \`getUsage(): UsageStats\` - Get usage statistics
+
+#### \`chatWithTools(messages, options?, logger?)\`
+
+Execute a multi-turn conversation with Tool Use support.
+
+**Parameters:**
+- \`messages: ChatMessage[]\` - Conversation messages
+- \`options?: ChatOptions\` - Chat options including tools
+- \`logger?: Logger\` - Optional logger
+
+**Returns:** \`Promise<ChatResponseWithTools>\`
+
+#### \`chatStream(messages, options?, onEvent?, logger?)\`
+
+Execute a streaming conversation with Tool Use support.
+
+**Parameters:**
+- \`messages: ChatMessage[]\` - Conversation messages
+- \`options?: ChatOptions\` - Chat options
+- \`onEvent?: (event: StreamEvent) => void\` - Event callback
+- \`logger?: Logger\` - Optional logger
+
+**Returns:** \`Promise<ChatResponseWithTools>\`
+
+#### \`AIClient.buildToolResultMessage(toolUseId, result, isError?)\`
+
+Build a tool result message for the next conversation turn.
+
+**Parameters:**
+- \`toolUseId: string\` - The tool_use ID to respond to
+- \`result: string | ToolResultContent[]\` - Tool execution result
+- \`isError?: boolean\` - Whether the result is an error
+
+**Returns:** \`ChatMessage\`
 
 ## Development
 
-```bash
+\`\`\`bash
 # Install dependencies
 npm install
 
@@ -108,7 +221,7 @@ npm run build
 
 # Run tests in watch mode
 npm run test:watch
-```
+\`\`\`
 
 ## License
 
