@@ -1,5 +1,5 @@
 import { AIClient } from './ai-client';
-import { UsageStats, ProviderConfig, ChatMessage, ChatResponse } from '../types/types';
+import { UsageStats, ProviderConfig, ChatMessage, ChatResponse, ChatResponseWithTools, ToolDefinition } from '../types/types';
 import { loadProviders } from '../config/config';
 import { extractJson } from '../utils/json-extractor';
 import { executeWithRetry } from '../utils/retry';
@@ -553,6 +553,110 @@ describe('AIClient', () => {
         baseURL: config.baseURL,
         apiKey: config.authToken,
       });
+    });
+  });
+
+  describe('chatWithTools', () => {
+    // Integration tests that skip if no API key
+    const hasApiKey = process.env.ANTHROPIC_API_KEY;
+    const testFn = hasApiKey ? it : it.skip;
+
+    const tools: ToolDefinition[] = [
+      {
+        name: 'get_weather',
+        description: 'Get the current weather in a location',
+        input_schema: {
+          type: 'object',
+          properties: {
+            location: {
+              type: 'string',
+              description: 'The city and state, e.g. San Francisco, CA',
+            },
+          },
+          required: ['location'],
+        },
+      },
+    ];
+
+    testFn('should call API with tools and return response with tool calls', async () => {
+      const client = new AIClient();
+      const messages: ChatMessage[] = [
+        { role: 'user', content: 'What is the weather in San Francisco?' },
+      ];
+
+      const response = await client.chatWithTools(messages, { tools });
+
+      expect(response).toBeDefined();
+      expect(response.model).toBeDefined();
+      expect(response.usage).toBeDefined();
+      expect(response.stopReason).toBeDefined();
+      // Tool use should be present
+      if (response.toolCalls && response.toolCalls.length > 0) {
+        expect(response.toolCalls[0].type).toBe('tool_use');
+        expect(response.toolCalls[0].name).toBe('get_weather');
+        expect(response.toolCalls[0].id).toBeDefined();
+        expect(response.toolCalls[0].input).toBeDefined();
+      }
+    });
+
+    testFn('should support tool_choice parameter', async () => {
+      const client = new AIClient();
+      const messages: ChatMessage[] = [
+        { role: 'user', content: 'What is the weather?' },
+      ];
+
+      const response = await client.chatWithTools(messages, {
+        tools,
+        toolChoice: 'auto',
+      });
+
+      expect(response).toBeDefined();
+      expect(response.model).toBeDefined();
+    });
+
+    testFn('should handle text-only response', async () => {
+      const client = new AIClient();
+      const messages: ChatMessage[] = [
+        { role: 'user', content: 'Hello, how are you?' },
+      ];
+
+      const response = await client.chatWithTools(messages, { tools });
+
+      expect(response).toBeDefined();
+      expect(response.text).toBeDefined();
+      expect(response.model).toBeDefined();
+    });
+
+    testFn('should support custom logger', async () => {
+      const logger = {
+        debug: jest.fn(),
+        info: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn(),
+      };
+
+      const client = new AIClient();
+      const messages: ChatMessage[] = [
+        { role: 'user', content: 'Hello' },
+      ];
+
+      await client.chatWithTools(messages, { tools }, logger);
+
+      expect(logger.debug).toHaveBeenCalled();
+    });
+
+    testFn('should update usage stats', async () => {
+      const client = new AIClient();
+      const messages: ChatMessage[] = [
+        { role: 'user', content: 'What is the weather?' },
+      ];
+
+      const initialStats = client.getUsageStats();
+      await client.chatWithTools(messages, { tools });
+      const finalStats = client.getUsageStats();
+
+      expect(finalStats.totalCalls).toBe(initialStats.totalCalls + 1);
+      expect(finalStats.successCalls).toBe(initialStats.successCalls + 1);
     });
   });
 });
