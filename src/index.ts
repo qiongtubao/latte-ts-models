@@ -7,10 +7,19 @@ export type {
   ModelConfig,
   ChatMessage,
   ChatResponse,
+  ChatResponseWithTools,
   ChatOptions,
   Usage,
   UsageStats,
   Logger,
+  ToolDefinition,
+  SchemaProperty,
+  ContentBlock,
+  TextBlock,
+  ToolUseBlock,
+  ToolResultBlock,
+  ToolResultContent,
+  StreamEvent,
 } from './types/types';
 
 // Error classes
@@ -19,6 +28,8 @@ export {
   HttpError,
   RateLimitError,
   NonRetryableError,
+  StreamInterruptedError,
+  ContextLengthExceededError,
 } from './types/types';
 
 // Utility functions
