@@ -1,7 +1,8 @@
-import { UsageStats, Usage, ProviderConfig, ChatMessage, ChatResponse, ChatOptions, Logger, ChatResponseWithTools, ToolDefinition, ToolUseBlock, ContentBlock, StreamInterruptedError } from '../types/types';
+import { UsageStats, Usage, ProviderConfig, ChatMessage, ChatResponse, ChatOptions, Logger, ChatResponseWithTools, ToolDefinition, ToolUseBlock, ContentBlock, StreamInterruptedError, ToolResultBlock, FormatOptions } from '../types/types';
 import { loadProviders, LoadProvidersOptions } from '../config/config';
 import { extractJson as extractJsonUtil } from '../utils/json-extractor';
 import { executeWithRetry } from '../utils/retry';
+import { formatToolResult } from '../utils/tool-result-formatter';
 import Anthropic from '@anthropic-ai/sdk';
 
 /**
@@ -67,6 +68,37 @@ export class AIClient {
    */
   extractJson(text: string): any {
     return extractJsonUtil(text);
+  }
+
+  /**
+   * 构建工具结果消息（增强版）
+   *
+   * @param toolUseId - 对应的 tool_use ID
+   * @param result - 工具执行结果
+   * @param isError - 是否是错误结果
+   * @param formatOptions - 格式化选项
+   * @returns 工具结果消息
+   */
+  static buildToolResultMessage(
+    toolUseId: string,
+    result: any,
+    isError: boolean = false,
+    formatOptions?: FormatOptions
+  ): ChatMessage {
+    // Format the result
+    const formattedContent = formatToolResult(result, isError, formatOptions);
+
+    const toolResultBlock: ToolResultBlock = {
+      type: 'tool_result',
+      tool_use_id: toolUseId,
+      content: formattedContent,
+      is_error: isError
+    };
+
+    return {
+      role: 'user',
+      content: [toolResultBlock]
+    };
   }
 
   /**

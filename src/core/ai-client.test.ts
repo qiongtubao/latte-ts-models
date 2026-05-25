@@ -1,5 +1,5 @@
 import { AIClient } from './ai-client';
-import { UsageStats, ProviderConfig, ChatMessage, ChatResponse, ChatResponseWithTools, ToolDefinition, StreamInterruptedError } from '../types/types';
+import { UsageStats, ProviderConfig, ChatMessage, ChatResponse, ChatResponseWithTools, ToolDefinition, StreamInterruptedError, ToolResultBlock, FormatOptions } from '../types/types';
 import { loadProviders } from '../config/config';
 import { extractJson } from '../utils/json-extractor';
 import { executeWithRetry } from '../utils/retry';
@@ -798,6 +798,39 @@ describe('AIClient', () => {
 
       expect(error.name).toBe('StreamInterruptedError');
       expect(error.partialResponse).toBeDefined();
+    });
+  });
+
+  describe('buildToolResultMessage (enhanced)', () => {
+    test('should format object result with Markdown', () => {
+      const data = { temp: 25, city: 'Beijing' };
+      const message = AIClient.buildToolResultMessage('tool_1', data);
+
+      expect(message.role).toBe('user');
+      const content = message.content as ToolResultBlock[];
+      expect(content[0].content).toContain('```json');
+      expect(content[0].content).toContain('"temp"');
+    });
+
+    test('should truncate error stacks', () => {
+      const error = new Error('Test error\n' + 'line\n'.repeat(20));
+      const message = AIClient.buildToolResultMessage('tool_2', error, true, {
+        maxErrorLines: 5
+      });
+
+      const content = message.content as ToolResultBlock[];
+      expect(content[0].content).toContain('more lines truncated');
+    });
+
+    test('should respect formatOptions', () => {
+      const data = { a: 1 };
+      const message = AIClient.buildToolResultMessage('tool_3', data, false, {
+        useMarkdown: false,
+        jsonIndent: 4
+      });
+
+      const content = message.content as ToolResultBlock[];
+      expect((content[0].content as string)).not.toContain('```');
     });
   });
 });
