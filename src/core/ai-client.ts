@@ -893,4 +893,71 @@ export class AIClient {
       isSystemError: true
     };
   }
+
+  /**
+   * 清理悬空的 tool_use 和孤立的 tool_result 消息块
+   */
+  private cleanupHangingToolCalls(messages: ChatMessage[]): ChatMessage[] {
+    const cleaned = [...messages];
+
+    // Step 1: Find all tool_use IDs
+    const toolUseIds = new Set<string>();
+    for (const msg of cleaned) {
+      if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+        for (const block of msg.content) {
+          if (block.type === 'tool_use') {
+            toolUseIds.add((block as ToolUseBlock).id);
+          }
+        }
+      }
+    }
+
+    // Step 2: Find all tool_result tool_use_ids
+    const toolResultIds = new Set<string>();
+    for (const msg of cleaned) {
+      if (msg.role === 'user' && Array.isArray(msg.content)) {
+        for (const block of msg.content) {
+          if (block.type === 'tool_result') {
+            toolResultIds.add((block as ToolResultBlock).tool_use_id);
+          }
+        }
+      }
+    }
+
+    // Step 3: Remove dangling tool_use blocks (no corresponding tool_result)
+    for (let i = 0; i < cleaned.length; i++) {
+      const msg = cleaned[i];
+      if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+        const blocks = msg.content as ContentBlock[];
+        const cleanedBlocks = blocks.filter(block => {
+          if (block.type === 'tool_use') {
+            return toolResultIds.has((block as ToolUseBlock).id);
+          }
+          return true;
+        });
+        if (cleanedBlocks.length !== blocks.length) {
+          cleaned[i] = { ...msg, content: cleanedBlocks };
+        }
+      }
+    }
+
+    // Step 4: Remove orphaned tool_result blocks (no corresponding tool_use)
+    for (let i = 0; i < cleaned.length; i++) {
+      const msg = cleaned[i];
+      if (msg.role === 'user' && Array.isArray(msg.content)) {
+        const blocks = msg.content as ContentBlock[];
+        const cleanedBlocks = blocks.filter(block => {
+          if (block.type === 'tool_result') {
+            return toolUseIds.has((block as ToolResultBlock).tool_use_id);
+          }
+          return true;
+        });
+        if (cleanedBlocks.length !== blocks.length) {
+          cleaned[i] = { ...msg, content: cleanedBlocks };
+        }
+      }
+    }
+
+    return cleaned;
+  }
 }

@@ -1,5 +1,5 @@
 import { AIClient } from './ai-client';
-import { UsageStats, ProviderConfig, ChatMessage, ChatResponse, ChatResponseWithTools, ToolDefinition, StreamInterruptedError, ToolResultBlock, FormatOptions, ToolUseBlock, NonRetryableError } from '../types/types';
+import { UsageStats, ProviderConfig, ChatMessage, ChatResponse, ChatResponseWithTools, ToolDefinition, StreamInterruptedError, ToolResultBlock, FormatOptions, ToolUseBlock, NonRetryableError, ContentBlock } from '../types/types';
 import { loadProviders } from '../config/config';
 import { extractJson } from '../utils/json-extractor';
 import { executeWithRetry } from '../utils/retry';
@@ -10,6 +10,93 @@ jest.mock('../config/config');
 jest.mock('../utils/json-extractor');
 jest.mock('../utils/retry');
 jest.mock('@anthropic-ai/sdk');
+
+describe('AIClient - cleanupHangingToolCalls', () => {
+  let ai: AIClient;
+
+  beforeEach(() => {
+    ai = new AIClient({
+      providers: {
+        anthropic: {
+          baseURL: 'https://api.anthropic.com',
+          authToken: 'test-key',
+          authType: 'apiKey',
+          models: ['claude-3-5-sonnet-20241022']
+        }
+      }
+    });
+  });
+
+  test('should remove dangling tool_use blocks', () => {
+    const messages: ChatMessage[] = [
+      { role: 'user', content: 'Test' },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'Response' },
+          { type: 'tool_use', id: 'tool_1', name: 'test', input: {} }
+        ]
+      }
+    ];
+
+    const cleaned = (ai as any).cleanupHangingToolCalls(messages);
+
+    const assistantMsg = cleaned[1] as ChatMessage;
+    const blocks = assistantMsg.content as ContentBlock[];
+    expect(blocks.filter(b => b.type === 'tool_use')).toHaveLength(0);
+  });
+
+  test('should remove orphaned tool_result blocks', () => {
+    const messages: ChatMessage[] = [
+      { role: 'user', content: 'Test' },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'nonexistent',
+            content: 'Orphaned result'
+          }
+        ]
+      }
+    ];
+
+    const cleaned = (ai as any).cleanupHangingToolCalls(messages);
+
+    const toolResultMsg = cleaned[1] as ChatMessage;
+    const blocks = toolResultMsg.content as ContentBlock[];
+    expect(blocks.filter(b => b.type === 'tool_result')).toHaveLength(0);
+  });
+
+  test('should keep matched tool_use and tool_result', () => {
+    const messages: ChatMessage[] = [
+      { role: 'user', content: 'Test' },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: 'tool_1', name: 'test', input: {} }
+        ]
+      },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'tool_1',
+            content: 'Result'
+          }
+        ]
+      }
+    ];
+
+    const cleaned = (ai as any).cleanupHangingToolCalls(messages);
+
+    expect(cleaned).toHaveLength(3);
+    const assistantMsg = cleaned[1] as ChatMessage;
+    const blocks = assistantMsg.content as ContentBlock[];
+    expect(blocks.filter(b => b.type === 'tool_use')).toHaveLength(1);
+  });
+});
 
 describe('AIClient', () => {
   // Mock 配置
