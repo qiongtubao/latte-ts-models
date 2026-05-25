@@ -118,6 +118,141 @@ while (response.toolCalls && response.toolCalls.length > 0) {
 console.log(response.text);
 \`\`\`
 
+### Complete Tool Use Loop
+
+\`\`\`typescript
+import { AIClient, ToolDefinition } from 'latte-ts-models';
+
+const ai = new AIClient({ /* config */ });
+
+const tools: ToolDefinition[] = [
+  {
+    name: 'search_web',
+    description: 'Search the web',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Search query' }
+      },
+      required: ['query']
+    }
+  },
+  {
+    name: 'read_file',
+    description: 'Read a file',
+    input_schema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'File path' }
+      },
+      required: ['path']
+    }
+  }
+];
+
+// Execute complete tool use loop automatically
+const result = await ai.executeToolUseLoop(
+  [{ role: 'user', content: 'Find documentation about React hooks' }],
+  { tools },
+  async (name, input, context) => {
+    if (name === 'search_web') {
+      return await searchAPI(input.query);
+    } else if (name === 'read_file') {
+      return await readFile(input.path);
+    }
+    throw new Error(`Unknown tool: ${name}`);
+  },
+  {
+    maxIterations: 10,
+    forceFinalize: true,
+    timeout: 120000,
+    onStateChange: (state) => console.log(`State: ${state}`),
+    onToolCall: (toolCall) => console.log(`Calling: ${toolCall.name}`),
+    onToolResult: (result) => console.log(`Result: ${result.success ? 'OK' : 'FAIL'}`)
+  }
+);
+
+if (result.status === 'completed') {
+  console.log('Response:', result.response.text);
+} else if (result.status === 'max_iterations') {
+  console.log('Reached max iterations');
+  console.log('Executed', result.toolCallsExecuted, 'tool calls');
+} else {
+  console.error('Error:', result.error?.message);
+}
+
+// Access complete conversation history
+console.log('Messages:', result.messages);
+\`\`\`
+
+### Parallel Tool Execution
+
+\`\`\`typescript
+// Execute multiple tool calls in parallel
+const toolCalls = [
+  { type: 'tool_use', id: 'tool_1', name: 'get_user', input: { userId: 'user_1' } },
+  { type: 'tool_use', id: 'tool_2', name: 'get_user', input: { userId: 'user_2' } },
+  { type: 'tool_use', id: 'tool_3', name: 'update_balance', input: { userId: 'user_1', amount: 100 } }
+];
+
+const results = await ai.executeToolsParallel(
+  toolCalls,
+  async (name, input) => {
+    if (name === 'get_user') return await getUser(input.userId);
+    if (name === 'update_balance') return await updateBalance(input.userId, input.amount);
+    throw new Error(`Unknown tool: ${name}`);
+  },
+  {
+    maxConcurrency: 5,
+    // Group by userId to prevent race conditions
+    getResourceKey: (tc) => tc.input.userId,
+    // Read operations are concurrency-safe
+    isConcurrencySafe: (tc) => tc.name === 'get_user',
+    onBatchStart: (batch) => console.log(`Starting batch of ${batch.length}`),
+    onBatchEnd: (results) => console.log(`Batch completed: ${results.size} results`)
+  }
+);
+
+// Results are keyed by tool call ID
+for (const [toolId, result] of results) {
+  console.log(`${toolId}: ${result.success ? 'success' : result.error}`);
+}
+\`\`\`
+
+### Chat History Persistence
+
+\`\`\`typescript
+import { ChatHistory } from 'latte-ts-models';
+
+// Create history with auto-save enabled
+const history = new ChatHistory(100_000, {
+  persistence: {
+    provider: 'file',
+    filePath: './data/conversation.json',
+    autoSave: true,        // Auto-save on every message
+    autoSaveDelay: 500,    // Debounce 500ms
+    validateData: true    // Validate on load
+  },
+  onTruncate: (event) => {
+    console.log(`Removed ${event.removedMessages.length} messages`);
+  }
+});
+
+// Messages are automatically saved
+history.addUserMessage('What is the weather?');
+history.addAssistantMessage('Let me check...');
+
+// Manual save/load
+await history.saveToFile('./backup/conversation.json');
+await history.loadFromFile('./backup/conversation.json');
+
+// Force flush before program exit
+process.on('SIGINT', async () => {
+  await history.flush();
+  process.exit(0);
+});
+\`\`\`
+
 ### Streaming Example
 
 \`\`\`typescript
@@ -333,6 +468,41 @@ Execute tool with automatic retry on failure.
 - \`options?: { logger?, onRetry? }\` - Optional configuration
 
 **Returns:** \`Promise<ToolExecutionResult>\`
+
+#### \`executeToolUseLoop(messages, options, executor, loopOptions?)\`
+
+Execute complete Tool Use loop automatically.
+
+**Parameters:**
+- \`messages: ChatMessage[]\` - Initial conversation messages
+- \`options: ChatOptions\` - Chat options with tools
+- \`executor: ToolExecutor\` - Tool execution function
+- \`loopOptions?: ToolUseLoopOptions\` - Loop control options
+
+**Returns:** \`Promise<ToolUseLoopResult>\`
+
+#### \`executeToolsParallel(toolCalls, executor, options?)\`
+
+Execute multiple tool calls in parallel.
+
+**Parameters:**
+- \`toolCalls: ToolUseBlock[]\` - Tool calls to execute
+- \`executor: ToolExecutor\` - Tool execution function
+- \`options?: ParallelExecutionOptions\` - Parallel execution options
+
+**Returns:** \`Promise<Map<string, ToolExecutionResult>>\`
+
+#### \`ChatHistory.saveToFile(filePath?)\`
+
+Save history to file.
+
+#### \`ChatHistory.loadFromFile(filePath?)\`
+
+Load history from file.
+
+#### \`ChatHistory.flush()\`
+
+Force flush (immediately save).
 
 #### \`formatToolResult(result, isError?, options?)\`
 
