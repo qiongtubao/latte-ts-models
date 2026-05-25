@@ -143,6 +143,103 @@ const response = await ai.chatStream(
 );
 \`\`\`
 
+### ChatHistory Example
+
+\`\`\`typescript
+import { AIClient, ChatHistory, ToolDefinition } from 'latte-ts-models';
+
+const ai = new AIClient({ /* config */ });
+
+// Create history manager with 100K token limit
+const history = new ChatHistory(100_000, {
+  onTruncate: (event) => {
+    console.log(`Removed ${event.removedMessages.length} messages`);
+    // Optionally: store in vector DB for later retrieval
+  }
+});
+
+// Add user message
+history.addUserMessage('What\'s the weather in Beijing?');
+
+// Get response with tools
+let response = await ai.chatWithTools(history.getMessages(), { tools });
+
+// Add assistant response with tool calls
+history.addAssistantMessageWithTools(response.text, response.toolCalls || []);
+
+// Add tool results
+for (const toolCall of response.toolCalls || []) {
+  const result = await executeTool(toolCall.name, toolCall.input);
+  history.addToolResult(toolCall.id, result);
+}
+
+console.log(`Total tokens: ${history.getTotalTokens()}`);
+console.log(`Messages: ${history.getMessageCount()}`);
+\`\`\`
+
+### Streaming with Callbacks
+
+\`\`\`typescript
+const response = await ai.chatStream(
+  history.getMessages(),
+  { tools },
+  (event) => {
+    switch (event.type) {
+      case 'stream_start':
+        console.log(`Using model: ${event.model}`);
+        break;
+      case 'text':
+        process.stdout.write(event.delta);  // Real-time typewriter effect
+        break;
+      case 'tool_use_start':
+        console.log(`\n[Calling: ${event.toolName}]`);
+        break;
+      case 'tool_use_input':
+        process.stdout.write('.');  // Show progress
+        break;
+      case 'tool_use_end':
+        console.log(`[Tool ready]`);
+        break;
+      case 'stream_end':
+        console.log(`\nDone: ${event.usage?.outputTokens} tokens`);
+        break;
+      case 'stream_error':
+        console.error(`Error: ${event.error?.message}`);
+        break;
+    }
+  }
+);
+\`\`\`
+
+### Tool Execution with Retry
+
+\`\`\`typescript
+// Define tool executor
+async function executeWeatherTool(name: string, input: any, context) {
+  // Downgrade quality on retry for faster response
+  const quality = context.attempt === 1 ? 'high' : 'low';
+  return await fetchWeather(input.city, { quality });
+}
+
+// Execute with automatic retry
+const result = await ai.executeToolWithRetry(
+  toolCall,
+  executeWeatherTool,
+  3,  // Max 3 attempts
+  {
+    onRetry: (event) => {
+      console.log(`Retry ${event.attempt}/${event.maxRetries} in ${event.delay}ms`);
+    }
+  }
+);
+
+if (result.success) {
+  history.addToolResult(toolCall.id, result.result);
+} else {
+  history.addToolResult(toolCall.id, result.error, true);
+}
+\`\`\`
+
 ## Documentation
 
 For complete documentation including:
@@ -206,6 +303,47 @@ Build a tool result message for the next conversation turn.
 - \`isError?: boolean\` - Whether the result is an error
 
 **Returns:** \`ChatMessage\`
+
+#### \`ChatHistory\`
+
+Manage conversation history with automatic Token counting.
+
+**Constructor:**
+- \`maxTokens: number\` - Maximum Token limit (default: 100000)
+- \`options?: { tokenizer?, onTruncate? }\` - Optional configuration
+
+**Methods:**
+- \`addUserMessage(content: string)\` - Add user message
+- \`addAssistantMessage(text: string)\` - Add assistant text message
+- \`addAssistantMessageWithTools(text, toolCalls)\` - Add assistant message with tools
+- \`addToolResult(toolUseId, result, isError?)\` - Add tool result
+- \`getMessages()\` - Get all messages (readonly)
+- \`getTotalTokens()\` - Get current Token count
+- \`getMessageCount()\` - Get message count
+- \`clear()\` - Clear all messages
+
+#### \`executeToolWithRetry(toolCall, executor, maxRetries?, options?)\`
+
+Execute tool with automatic retry on failure.
+
+**Parameters:**
+- \`toolCall: ToolUseBlock\` - Tool call to execute
+- \`executor: ToolExecutor\` - Tool execution function
+- \`maxRetries?: number\` - Maximum retry attempts (default: 3)
+- \`options?: { logger?, onRetry? }\` - Optional configuration
+
+**Returns:** \`Promise<ToolExecutionResult>\`
+
+#### \`formatToolResult(result, isError?, options?)\`
+
+Format tool result for LLM consumption.
+
+**Parameters:**
+- \`result: any\` - Tool execution result
+- \`isError?: boolean\` - Whether this is an error result
+- \`options?: FormatOptions\` - Formatting options
+
+**Returns:** \`string | ToolResultContent[]\`
 
 ## Development
 
