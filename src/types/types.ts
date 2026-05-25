@@ -310,3 +310,88 @@ export interface TruncateEvent {
   removedMessages: ChatMessage[];  // Messages that were removed
   remainingTokens: number;          // Token count after truncation
 }
+
+/**
+ * Tool Use 循环状态（细颗粒度）
+ */
+export type ToolUseLoopState =
+  | 'idle'              // 空闲
+  | 'thinking'          // 模型思考中
+  | 'executing_tools'   // 工具执行中
+  | 'processing_results' // 工具结果处理中
+  | 'finalizing'        // 强制收尾中
+  | 'completed'         // 完成
+  | 'failed';           // 失败
+
+/**
+ * Tool Use 循环结果状态
+ */
+export type ToolUseLoopResultStatus =
+  | 'completed'         // 正常完成
+  | 'max_iterations'    // 达到最大迭代次数
+  | 'error';            // 发生错误
+
+/**
+ * 循环错误信息结构
+ */
+export interface ToolUseLoopError {
+  code: 'TIMEOUT' | 'MAX_ITERATIONS' | 'TOOL_EXECUTION_FAILED' | 'UNKNOWN';
+  message: string;
+  originalError?: Error;
+}
+
+/**
+ * Tool Use 循环选项
+ */
+export interface ToolUseLoopOptions {
+  maxIterations?: number;                              // 最大迭代次数（默认 10）
+  forceFinalize?: boolean;                             // 达到上限时强制收尾（默认 true）
+  timeout?: number;                                    // 全局超时时间（毫秒，默认 120000）
+  onStateChange?: (state: ToolUseLoopState) => void;   // 状态变更回调
+  onToolCall?: (toolCall: ToolUseBlock) => void;       // 工具调用回调
+  onToolResult?: (result: ToolExecutionResult) => void; // 工具结果回调
+  shouldContinue?: (iteration: number, response: ChatResponseWithTools) => boolean;
+}
+
+/**
+ * Tool Use 循环结果
+ */
+export interface ToolUseLoopResult {
+  status: ToolUseLoopResultStatus;
+  response: ChatResponse;
+  messages: ChatMessage[];
+  iterations: number;
+  toolCallsExecuted: number;
+  state: ToolUseLoopState;
+  error?: ToolUseLoopError;
+}
+
+/**
+ * 并发执行选项
+ */
+export interface ParallelExecutionOptions {
+  maxConcurrency?: number;                               // 最大并发数（默认 5）
+  getResourceKey?: (toolCall: ToolUseBlock) => string | null; // 资源分组键
+  isConcurrencySafe?: (toolCall: ToolUseBlock) => boolean; // 是否并发安全
+  logger?: Logger;
+  onRetry?: (event: RetryEvent) => void;
+  onBatchStart?: (batch: ToolUseBlock[]) => void;
+  onBatchEnd?: (results: Map<string, ToolExecutionResult>) => void;
+}
+
+/**
+ * 持久化存储提供者类型
+ */
+export type PersistenceProvider = 'file' | 'sqlite' | 'indexeddb';
+
+/**
+ * 历史持久化选项
+ */
+export interface HistoryPersistenceOptions {
+  provider?: PersistenceProvider;
+  filePath?: string;
+  autoSave?: boolean;
+  autoSaveDelay?: number;
+  debounce?: boolean;
+  validateData?: boolean;
+}
