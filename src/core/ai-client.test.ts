@@ -1,5 +1,5 @@
 import { AIClient } from './ai-client';
-import { UsageStats, ProviderConfig, ChatMessage, ChatResponse, ChatResponseWithTools, ToolDefinition, StreamInterruptedError, ToolResultBlock, FormatOptions } from '../types/types';
+import { UsageStats, ProviderConfig, ChatMessage, ChatResponse, ChatResponseWithTools, ToolDefinition, StreamInterruptedError, ToolResultBlock, FormatOptions, ToolUseBlock, NonRetryableError } from '../types/types';
 import { loadProviders } from '../config/config';
 import { extractJson } from '../utils/json-extractor';
 import { executeWithRetry } from '../utils/retry';
@@ -896,6 +896,198 @@ describe('AIClient', () => {
 
       const content = message.content as ToolResultBlock[];
       expect((content[0].content as string)).not.toContain('```');
+    });
+  });
+
+  describe('executeToolWithRetry', () => {
+    let ai: AIClient;
+
+    beforeEach(() => {
+      ai = new AIClient({
+        providers: {
+          anthropic: {
+            baseURL: 'https://api.anthropic.com',
+            authToken: 'test-key',
+            authType: 'apiKey',
+            models: ['claude-3-5-sonnet-20241022']
+          }
+        }
+      });
+    });
+
+    test('should return success on first attempt', async () => {
+      const toolCall: ToolUseBlock = {
+        type: 'tool_use',
+        id: 'tool_1',
+        name: 'test_tool',
+        input: { query: 'test' }
+      };
+
+      const executor = jest.fn().mockResolvedValue({ result: 'success' });
+
+      const result = await ai.executeToolWithRetry(toolCall, executor, 3);
+
+      expect(result.success).toBe(true);
+      expect(result.result).toEqual({ result: 'success' });
+      expect(executor).toHaveBeenCalledTimes(1);
+    });
+
+    test('should retry on failure', async () => {
+      const toolCall: ToolUseBlock = {
+        type: 'tool_use',
+        id: 'tool_2',
+        name: 'test_tool',
+        input: {}
+      };
+
+      const executor = jest.fn()
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockResolvedValueOnce({ result: 'success' });
+
+      const result = await ai.executeToolWithRetry(toolCall, executor, 3);
+
+      expect(result.success).toBe(true);
+      expect(executor).toHaveBeenCalledTimes(2);
+    });
+
+    test('should fail after max retries', async () => {
+      const toolCall: ToolUseBlock = {
+        type: 'tool_use',
+        id: 'tool_3',
+        name: 'test_tool',
+        input: {}
+      };
+
+      const executor = jest.fn()
+        .mockRejectedValue(new Error('Persistent error'));
+
+      const result = await ai.executeToolWithRetry(toolCall, executor, 2);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('Persistent error');
+      expect(executor).toHaveBeenCalledTimes(2);
+    });
+
+    test('should not retry NonRetryableError', async () => {
+      const toolCall: ToolUseBlock = {
+        type: 'tool_use',
+        id: 'tool_4',
+        name: 'test_tool',
+        input: {}
+      };
+
+      const executor = jest.fn()
+        .mockRejectedValue(new NonRetryableError('Invalid input'));
+
+      const result = await ai.executeToolWithRetry(toolCall, executor, 3);
+
+      expect(result.success).toBe(false);
+      expect(executor).toHaveBeenCalledTimes(1);
+    });
+
+    test('should trigger onRetry callback', async () => {
+      const toolCall: ToolUseBlock = {
+        type: 'tool_use',
+        id: 'tool_5',
+        name: 'test_tool',
+        input: {}
+      };
+
+      const executor = jest.fn()
+        .mockRejectedValueOnce(new Error('Error 1'))
+        .mockResolvedValueOnce({ result: 'success' });
+
+      const retryEvents: any[] = [];
+
+      await ai.executeToolWithRetry(toolCall, executor, 3, {
+        onRetry: (event) => retryEvents.push(event)
+      });
+
+      expect(retryEvents.length).toBe(1);
+      expect(retryEvents[0].attempt).toBe(1);
+      expect(retryEvents[0].toolName).toBe('test_tool');
+    });
+
+    test('should pass context to executor', async () => {
+      const toolCall: ToolUseBlock = {
+        type: 'tool_use',
+        id: 'tool_6',
+        name: 'test_tool',
+        input: { key: 'value' }
+      };
+
+      let receivedContext: any;
+
+      const executor = jest.fn().mockImplementation(async (name, input, context) => {
+        receivedContext = context;
+        return { result: 'success' };
+      });
+
+      await ai.executeToolWithRetry(toolCall, executor, 3);
+
+      expect(receivedContext).toBeDefined();
+      expect(receivedContext.attempt).toBe(1);
+      expect(receivedContext.maxRetries).toBe(3);
+      expect(receivedContext.toolId).toBe('tool_6');
+    });
+
+    test('should support custom logger', async () => {
+      const toolCall: ToolUseBlock = {
+        type: 'tool_use',
+        id: 'tool_7',
+        name: 'test_tool',
+        input: {}
+      };
+
+      const executor = jest.fn().mockResolvedValue({ result: 'success' });
+
+      const logger = {
+        debug: jest.fn(),
+        info: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn(),
+      };
+
+      await ai.executeToolWithRetry(toolCall, executor, 3, { logger });
+
+      expect(logger.debug).toHaveBeenCalledWith(
+        'Executing tool (attempt 1/3)',
+        expect.objectContaining({
+          toolName: 'test_tool',
+          toolId: 'tool_7',
+        })
+      );
+      expect(logger.debug).toHaveBeenCalledWith(
+        'Tool execution successful',
+        expect.objectContaining({
+          toolName: 'test_tool',
+        })
+      );
+    });
+
+    test('should use exponential backoff', async () => {
+      const toolCall: ToolUseBlock = {
+        type: 'tool_use',
+        id: 'tool_8',
+        name: 'test_tool',
+        input: {}
+      };
+
+      const executor = jest.fn()
+        .mockRejectedValueOnce(new Error('Error 1'))
+        .mockRejectedValueOnce(new Error('Error 2'))
+        .mockResolvedValueOnce({ result: 'success' });
+
+      const retryEvents: any[] = [];
+
+      await ai.executeToolWithRetry(toolCall, executor, 3, {
+        onRetry: (event) => retryEvents.push(event)
+      });
+
+      // First retry: delay = min(1000 * 2^0, 10000) = 1000
+      expect(retryEvents[0].delay).toBe(1000);
+      // Second retry: delay = min(1000 * 2^1, 10000) = 2000
+      expect(retryEvents[1].delay).toBe(2000);
     });
   });
 });

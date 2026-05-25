@@ -1,4 +1,4 @@
-import { UsageStats, Usage, ProviderConfig, ChatMessage, ChatResponse, ChatOptions, Logger, ChatResponseWithTools, ToolDefinition, ToolUseBlock, ContentBlock, StreamInterruptedError, ToolResultBlock, FormatOptions, StreamEventCallback } from '../types/types';
+import { UsageStats, Usage, ProviderConfig, ChatMessage, ChatResponse, ChatOptions, Logger, ChatResponseWithTools, ToolDefinition, ToolUseBlock, ContentBlock, StreamInterruptedError, ToolResultBlock, FormatOptions, StreamEventCallback, ToolExecutor, ToolExecutionResult, RetryEvent, NonRetryableError } from '../types/types';
 import { loadProviders, LoadProvidersOptions } from '../config/config';
 import { extractJson as extractJsonUtil } from '../utils/json-extractor';
 import { executeWithRetry } from '../utils/retry';
@@ -805,5 +805,92 @@ export class AIClient {
 
       throw error;
     }
+  }
+
+  /**
+   * 执行工具调用并自动重试
+   *
+   * @param toolCall - 工具调用信息
+   * @param executor - 工具执行函数
+   * @param maxRetries - 最大重试次数（默认 3）
+   * @param options - 可选配置
+   * @returns 工具执行结果
+   */
+  async executeToolWithRetry(
+    toolCall: ToolUseBlock,
+    executor: ToolExecutor,
+    maxRetries: number = 3,
+    options?: {
+      logger?: Logger;
+      onRetry?: (event: RetryEvent) => void;
+    }
+  ): Promise<ToolExecutionResult> {
+    const logger = options?.logger;
+    const onRetry = options?.onRetry;
+
+    let lastError: Error | null = null;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        logger?.debug(`Executing tool (attempt ${attempt}/${maxRetries})`, {
+          toolName: toolCall.name,
+          toolId: toolCall.id,
+          input: toolCall.input,
+        });
+
+        const result = await executor(toolCall.name, toolCall.input, {
+          attempt,
+          maxRetries,
+          toolId: toolCall.id
+        });
+
+        logger?.debug('Tool execution successful', {
+          toolName: toolCall.name,
+          attempt,
+        });
+
+        return { success: true, result };
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+
+        logger?.warn(`Tool execution failed (attempt ${attempt}/${maxRetries})`, {
+          toolName: toolCall.name,
+          error: lastError.message,
+        });
+
+        // If non-retryable error, break immediately
+        if (error instanceof NonRetryableError) {
+          logger?.error('Tool execution failed with non-retryable error', {
+            toolName: toolCall.name,
+            error: lastError.message,
+          });
+          break;
+        }
+
+        // Wait with exponential backoff before retry
+        if (attempt < maxRetries) {
+          const delay = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
+
+          // Trigger retry callback
+          onRetry?.({
+            toolName: toolCall.name,
+            toolId: toolCall.id,
+            attempt,
+            maxRetries,
+            delay,
+            error: lastError
+          });
+
+          logger?.debug(`Waiting ${delay}ms before retry`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
+    }
+
+    return {
+      success: false,
+      error: lastError?.message || 'Unknown error',
+      isSystemError: true
+    };
   }
 }
