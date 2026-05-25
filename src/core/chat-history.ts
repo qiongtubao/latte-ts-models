@@ -5,8 +5,11 @@ import {
   ToolResultBlock,
   TextBlock,
   Tokenizer,
-  TruncateEvent
+  TruncateEvent,
+  HistoryPersistenceOptions
 } from '../types/types';
+import * as fs from 'fs-extra';
+import * as path from 'path';
 
 /**
  * Conversation history manager with Token counting and automatic truncation
@@ -16,6 +19,9 @@ export class ChatHistory {
   private maxTokens: number;
   private tokenizer?: Tokenizer;
   private onTruncate?: (event: TruncateEvent) => void;
+  private persistence?: HistoryPersistenceOptions;
+  private saveDebounceTimer?: NodeJS.Timeout;
+  private writeLock: boolean = false;
 
   // Token estimation constants
   private readonly TOKENS_PER_WORD = 4;
@@ -27,11 +33,127 @@ export class ChatHistory {
     options?: {
       tokenizer?: Tokenizer;
       onTruncate?: (event: TruncateEvent) => void;
+      persistence?: HistoryPersistenceOptions;
     }
   ) {
     this.maxTokens = maxTokens;
     this.tokenizer = options?.tokenizer;
     this.onTruncate = options?.onTruncate;
+    this.persistence = options?.persistence;
+
+    // Auto-load on construction if persistence is configured
+    if (this.persistence?.filePath) {
+      this.loadFromFile().catch(err => {
+        console.warn('Failed to load history:', err);
+      });
+    }
+  }
+
+  /**
+   * 触发自动保存（防抖）
+   */
+  private triggerAutoSave(): void {
+    if (!this.persistence?.autoSave || !this.persistence?.filePath) {
+      return;
+    }
+
+    if (this.saveDebounceTimer) {
+      clearTimeout(this.saveDebounceTimer);
+    }
+
+    const delay = this.persistence.autoSaveDelay ?? 1000;
+    this.saveDebounceTimer = setTimeout(async () => {
+      await this.flush();
+    }, delay);
+  }
+
+  /**
+   * 强制落盘
+   */
+  async flush(): Promise<void> {
+    if (this.saveDebounceTimer) {
+      clearTimeout(this.saveDebounceTimer);
+      this.saveDebounceTimer = undefined;
+    }
+
+    if (!this.persistence?.filePath) {
+      return;
+    }
+
+    // Wait for write lock
+    while (this.writeLock) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+
+    this.writeLock = true;
+    try {
+      await this.saveToFile();
+    } finally {
+      this.writeLock = false;
+    }
+  }
+
+  /**
+   * 保存历史到文件
+   */
+  async saveToFile(filePath?: string): Promise<void> {
+    const targetPath = filePath || this.persistence?.filePath;
+    if (!targetPath) {
+      throw new Error('Storage path is not defined');
+    }
+
+    const data = {
+      version: '1.0',
+      messages: this.messages,
+      timestamp: new Date().toISOString(),
+      totalTokens: this.getTotalTokens(),
+      metadata: {
+        provider: this.persistence?.provider ?? 'file',
+        maxTokens: this.maxTokens
+      }
+    };
+
+    await fs.ensureDir(path.dirname(targetPath));
+    await fs.writeJson(targetPath, data, { spaces: 2 });
+  }
+
+  /**
+   * 从文件加载历史
+   */
+  async loadFromFile(filePath?: string): Promise<void> {
+    const targetPath = filePath || this.persistence?.filePath;
+    if (!targetPath) {
+      throw new Error('Storage path is not defined');
+    }
+
+    try {
+      if (!(await fs.pathExists(targetPath))) {
+        return;
+      }
+
+      const data = await fs.readJson(targetPath);
+
+      // Validate data structure
+      if (this.persistence?.validateData !== false) {
+        if (!Array.isArray(data?.messages)) {
+          console.warn('Invalid history file format: messages is not an array, using empty history');
+          return;
+        }
+
+        for (const msg of data.messages) {
+          if (msg.role !== 'user' && msg.role !== 'assistant') {
+            console.warn('Invalid message role in history file, using empty history');
+            return;
+          }
+        }
+      }
+
+      this.messages = data.messages || [];
+      this.enforceLimit();
+    } catch (error) {
+      console.warn('Failed to load history file, using empty history:', error);
+      this.messages = [];
+    }
   }
 
   /**
@@ -118,6 +240,7 @@ export class ChatHistory {
   addUserMessage(content: string): void {
     this.messages.push({ role: 'user', content });
     this.enforceLimit();
+    this.triggerAutoSave();
   }
 
   /**
@@ -126,6 +249,7 @@ export class ChatHistory {
   addAssistantMessage(text: string): void {
     this.messages.push({ role: 'assistant', content: text });
     this.enforceLimit();
+    this.triggerAutoSave();
   }
 
   /**
@@ -138,6 +262,7 @@ export class ChatHistory {
     ];
     this.messages.push({ role: 'assistant', content });
     this.enforceLimit();
+    this.triggerAutoSave();
   }
 
   /**
@@ -160,6 +285,7 @@ export class ChatHistory {
       content: [toolResultBlock]
     });
     this.enforceLimit();
+    this.triggerAutoSave();
   }
 
   /**
@@ -174,6 +300,7 @@ export class ChatHistory {
    */
   clear(): void {
     this.messages = [];
+    this.triggerAutoSave();
   }
 
   /**
