@@ -1,4 +1,4 @@
-import { UsageStats, Usage, ProviderConfig, ChatMessage, ChatResponse, ChatOptions, Logger, ChatResponseWithTools, ToolDefinition, ToolUseBlock, ContentBlock, StreamInterruptedError, ToolResultBlock, FormatOptions, StreamEventCallback, ToolExecutor, ToolExecutionResult, RetryEvent, NonRetryableError } from '../types/types';
+import { UsageStats, Usage, ProviderConfig, ChatMessage, ChatResponse, ChatOptions, Logger, ChatResponseWithTools, ToolDefinition, ToolUseBlock, ContentBlock, StreamInterruptedError, ToolResultBlock, FormatOptions, StreamEventCallback, ToolExecutor, ToolExecutionResult, RetryEvent, NonRetryableError, ParallelExecutionOptions } from '../types/types';
 import { loadProviders, LoadProvidersOptions } from '../config/config';
 import { extractJson as extractJsonUtil } from '../utils/json-extractor';
 import { executeWithRetry } from '../utils/retry';
@@ -892,6 +892,120 @@ export class AIClient {
       error: lastError?.message || 'Unknown error',
       isSystemError: true
     };
+  }
+
+  /**
+   * 并行执行多个工具调用
+   *
+   * @param toolCalls - 工具调用列表
+   * @param executor - 工具执行函数
+   * @param options - 并发执行选项
+   * @returns 工具执行结果 Map（按 toolCall.id 索引）
+   */
+  async executeToolsParallel(
+    toolCalls: ToolUseBlock[],
+    executor: ToolExecutor,
+    options?: ParallelExecutionOptions,
+    logger?: Logger
+  ): Promise<Map<string, ToolExecutionResult>> {
+    const maxConcurrency = options?.maxConcurrency ?? 5;
+    const getResourceKey = options?.getResourceKey;
+    const isConcurrencySafe = options?.isConcurrencySafe;
+    const results = new Map<string, ToolExecutionResult>();
+
+    if (toolCalls.length === 0) {
+      return results;
+    }
+
+    // Step 1: Separate concurrency-safe tools and group by resource
+    const safeTools: ToolUseBlock[] = [];
+    const resourceQueues = new Map<string | null, ToolUseBlock[]>();
+
+    for (const toolCall of toolCalls) {
+      // Check if tool is concurrency-safe
+      if (isConcurrencySafe?.(toolCall)) {
+        safeTools.push(toolCall);
+        continue;
+      }
+
+      // Extract resource key
+      const key = getResourceKey?.(toolCall) ?? null;
+      if (!resourceQueues.has(key)) {
+        resourceQueues.set(key, []);
+      }
+      resourceQueues.get(key)!.push(toolCall);
+    }
+
+    // Step 2: Build execution batches
+    const batches: ToolUseBlock[][] = [];
+
+    // Safe tools can all run in parallel (up to maxConcurrency)
+    if (safeTools.length > 0) {
+      for (let i = 0; i < safeTools.length; i += maxConcurrency) {
+        batches.push(safeTools.slice(i, i + maxConcurrency));
+      }
+    }
+
+    // Resource queues: same resource = sequential, different resources = parallel
+    const queueArrays = Array.from(resourceQueues.values());
+    if (queueArrays.length > 0) {
+      // Interleave: take one from each queue per parallel slot
+      const maxLen = Math.max(...queueArrays.map(q => q.length));
+      for (let j = 0; j < maxLen; j++) {
+        const parallelGroup: ToolUseBlock[] = [];
+        for (const queue of queueArrays) {
+          if (queue[j]) {
+            parallelGroup.push(queue[j]);
+          }
+        }
+        if (parallelGroup.length > 0) {
+          // Further split by maxConcurrency
+          for (let i = 0; i < parallelGroup.length; i += maxConcurrency) {
+            batches.push(parallelGroup.slice(i, i + maxConcurrency));
+          }
+        }
+      }
+    }
+
+    // Step 3: Execute batches
+    for (const batch of batches) {
+      options?.onBatchStart?.(batch);
+
+      const batchPromises = batch.map(async (toolCall) => {
+        try {
+          const result = await this.executeToolWithRetry(
+            toolCall,
+            executor,
+            3,
+            {
+              logger,
+              onRetry: options?.onRetry
+            }
+          );
+          results.set(toolCall.id, result);
+          return { toolCall, result };
+        } catch (error) {
+          // Exception isolation: single failure doesn't break batch
+          const failedResult: ToolExecutionResult = {
+            success: false,
+            error: error instanceof Error ? error.message : String(error),
+            isSystemError: true
+          };
+          results.set(toolCall.id, failedResult);
+          return { toolCall, result: failedResult };
+        }
+      });
+
+      await Promise.all(batchPromises);
+
+      options?.onBatchEnd?.(results);
+      logger?.debug('Batch completed', {
+        batchSize: batch.length,
+        successCount: batch.filter(tc => results.get(tc.id)?.success).length
+      });
+    }
+
+    return results;
   }
 
   /**

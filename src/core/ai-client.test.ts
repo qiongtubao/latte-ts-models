@@ -1,5 +1,5 @@
 import { AIClient } from './ai-client';
-import { UsageStats, ProviderConfig, ChatMessage, ChatResponse, ChatResponseWithTools, ToolDefinition, StreamInterruptedError, ToolResultBlock, FormatOptions, ToolUseBlock, NonRetryableError, ContentBlock } from '../types/types';
+import { UsageStats, ProviderConfig, ChatMessage, ChatResponse, ChatResponseWithTools, ToolDefinition, StreamInterruptedError, ToolResultBlock, FormatOptions, ToolUseBlock, NonRetryableError, ContentBlock, ParallelExecutionOptions } from '../types/types';
 import { loadProviders } from '../config/config';
 import { extractJson } from '../utils/json-extractor';
 import { executeWithRetry } from '../utils/retry';
@@ -1175,6 +1175,118 @@ describe('AIClient', () => {
       expect(retryEvents[0].delay).toBe(1000);
       // Second retry: delay = min(1000 * 2^1, 10000) = 2000
       expect(retryEvents[1].delay).toBe(2000);
+    });
+  });
+
+  describe('AIClient - executeToolsParallel', () => {
+    let ai: AIClient;
+
+    beforeEach(() => {
+      ai = new AIClient({
+        providers: {
+          anthropic: {
+            baseURL: 'https://api.anthropic.com',
+            authToken: 'test-key',
+            authType: 'apiKey',
+            models: ['claude-3-5-sonnet-20241022']
+          }
+        }
+      });
+    });
+
+    test('should return empty map for empty tool calls', async () => {
+      const results = await ai.executeToolsParallel([], jest.fn());
+      expect(results.size).toBe(0);
+    });
+
+    test('should execute tools in parallel', async () => {
+      const toolCalls: ToolUseBlock[] = [
+        { type: 'tool_use', id: 'tool_1', name: 'test', input: {} },
+        { type: 'tool_use', id: 'tool_2', name: 'test', input: {} }
+      ];
+
+      const executor = jest.fn().mockResolvedValue({ result: 'success' });
+      const results = await ai.executeToolsParallel(toolCalls, executor);
+
+      expect(results.size).toBe(2);
+      expect(results.get('tool_1')?.success).toBe(true);
+      expect(results.get('tool_2')?.success).toBe(true);
+    });
+
+    test('should isolate exceptions', async () => {
+      const toolCalls: ToolUseBlock[] = [
+        { type: 'tool_use', id: 'tool_1', name: 'test', input: {} },
+        { type: 'tool_use', id: 'tool_2', name: 'test', input: {} }
+      ];
+
+      const executor = jest.fn()
+        .mockResolvedValueOnce({ result: 'success' })
+        // Tool 2 fails persistently (all retries will fail)
+        .mockRejectedValue(new Error('Tool 2 failed'));
+
+      const results = await ai.executeToolsParallel(toolCalls, executor);
+
+      expect(results.size).toBe(2);
+      expect(results.get('tool_1')?.success).toBe(true);
+      // Tool 2 should fail after retries (executeToolWithRetry handles exceptions)
+      expect(results.get('tool_2')?.success).toBe(false);
+      expect(results.get('tool_2')?.error).toBe('Tool 2 failed');
+    });
+
+    test('should group by resource key', async () => {
+      const toolCalls: ToolUseBlock[] = [
+        { type: 'tool_use', id: 'tool_1', name: 'test', input: { userId: 'user_1' } },
+        { type: 'tool_use', id: 'tool_2', name: 'test', input: { userId: 'user_1' } },
+        { type: 'tool_use', id: 'tool_3', name: 'test', input: { userId: 'user_2' } }
+      ];
+
+      const executionOrder: string[] = [];
+      const executor = jest.fn().mockImplementation(async (name, input) => {
+        executionOrder.push(input.userId);
+        return { result: 'success' };
+      });
+
+      await ai.executeToolsParallel(toolCalls, executor, {
+        getResourceKey: (tc) => tc.input.userId
+      });
+
+      // user_1 tools should be sequential (tool_1 before tool_2)
+      const user1Indices = executionOrder.map((id, i) => id === 'user_1' ? i : -1).filter(i => i >= 0);
+      expect(user1Indices[1]).toBeGreaterThan(user1Indices[0]);
+    });
+
+    test('should identify concurrency-safe tools', async () => {
+      const toolCalls: ToolUseBlock[] = [
+        { type: 'tool_use', id: 'tool_1', name: 'read_only', input: {} },
+        { type: 'tool_use', id: 'tool_2', name: 'write_op', input: { userId: 'user_1' } }
+      ];
+
+      const executor = jest.fn().mockResolvedValue({ result: 'success' });
+
+      await ai.executeToolsParallel(toolCalls, executor, {
+        isConcurrencySafe: (tc) => tc.name === 'read_only',
+        getResourceKey: (tc) => tc.input.userId
+      });
+
+      expect(executor).toHaveBeenCalledTimes(2);
+    });
+
+    test('should trigger batch callbacks', async () => {
+      const toolCalls: ToolUseBlock[] = [
+        { type: 'tool_use', id: 'tool_1', name: 'test', input: {} }
+      ];
+
+      const executor = jest.fn().mockResolvedValue({ result: 'success' });
+      const onBatchStart = jest.fn();
+      const onBatchEnd = jest.fn();
+
+      await ai.executeToolsParallel(toolCalls, executor, {
+        onBatchStart,
+        onBatchEnd
+      });
+
+      expect(onBatchStart).toHaveBeenCalled();
+      expect(onBatchEnd).toHaveBeenCalled();
     });
   });
 });
