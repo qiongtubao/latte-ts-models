@@ -130,15 +130,74 @@ export interface ChatOptions {
 }
 
 /**
- * 流事件
+ * 流事件（扩展版）
  */
 export interface StreamEvent {
-  type: 'text' | 'tool_use_start' | 'tool_use_input' | 'tool_use_end' | 'tool_result' | 'message_stop';
+  type:
+    | 'stream_start'      // 流开始
+    | 'text'               // 文本增量
+    | 'tool_use_start'     // 工具调用开始
+    | 'tool_use_input'     // 工具输入增量
+    | 'tool_use_end'       // 工具调用完成
+    | 'stream_end'         // 流结束
+    | 'stream_error';      // 流错误
+
   delta?: string;              // 文本增量
   toolName?: string;           // 工具名称
   toolId?: string;             // 工具 ID
   partialInput?: any;          // 部分输入
-  result?: string | ToolResultContent[];  // 工具结果
+  error?: Error;               // 错误对象
+  model?: string;              // 模型名称
+  usage?: Usage;                // Token 用量
+}
+
+/**
+ * Stream event callback function type
+ */
+export type StreamEventCallback = (event: StreamEvent) => void;
+
+/**
+ * Tool executor function with retry context
+ */
+export type ToolExecutor = (
+  name: string,
+  input: any,
+  context: {
+    attempt: number;
+    maxRetries: number;
+    toolId: string;
+  }
+) => Promise<any>;
+
+/**
+ * Tool execution result
+ */
+export interface ToolExecutionResult {
+  success: boolean;
+  result?: any;
+  error?: string;
+  isSystemError?: boolean;
+}
+
+/**
+ * Retry event for onRetry callback
+ */
+export interface RetryEvent {
+  toolName: string;
+  toolId: string;
+  attempt: number;
+  maxRetries: number;
+  delay: number;
+  error: Error;
+}
+
+/**
+ * Tool result formatting options
+ */
+export interface FormatOptions {
+  maxErrorLines?: number;   // Max lines for error stacks (default: 10)
+  jsonIndent?: number;      // JSON indentation spaces (default: 2)
+  useMarkdown?: boolean;    // Wrap JSON in code blocks (default: true)
 }
 
 /**
@@ -235,4 +294,19 @@ export class ContextLengthExceededError extends NonRetryableError {
     super(message);
     this.name = 'ContextLengthExceededError';
   }
+}
+
+/**
+ * Tokenizer interface for custom Token counting
+ */
+export interface Tokenizer {
+  estimateTokens(text: string): number;
+}
+
+/**
+ * Truncation event for the onTruncate hook
+ */
+export interface TruncateEvent {
+  removedMessages: ChatMessage[];  // Messages that were removed
+  remainingTokens: number;          // Token count after truncation
 }
