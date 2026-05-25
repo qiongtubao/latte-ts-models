@@ -30,6 +30,14 @@ export type {
   ToolExecutionResult,
   RetryEvent,
   FormatOptions,
+  ToolUseLoopState,
+  ToolUseLoopResultStatus,
+  ToolUseLoopError,
+  ToolUseLoopOptions,
+  ToolUseLoopResult,
+  ParallelExecutionOptions,
+  PersistenceProvider,
+  HistoryPersistenceOptions,
 } from './types/types';
 
 // Error classes
