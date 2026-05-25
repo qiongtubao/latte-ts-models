@@ -1,4 +1,4 @@
-import { UsageStats, Usage, ProviderConfig, ChatMessage, ChatResponse, ChatOptions, Logger, ChatResponseWithTools, ToolDefinition, ToolUseBlock, ContentBlock, StreamInterruptedError, ToolResultBlock, FormatOptions, StreamEventCallback, ToolExecutor, ToolExecutionResult, RetryEvent, NonRetryableError, ParallelExecutionOptions } from '../types/types';
+import { UsageStats, Usage, ProviderConfig, ChatMessage, ChatResponse, ChatOptions, Logger, ChatResponseWithTools, ToolDefinition, ToolUseBlock, ContentBlock, StreamInterruptedError, ToolResultBlock, FormatOptions, StreamEventCallback, ToolExecutor, ToolExecutionResult, RetryEvent, NonRetryableError, ParallelExecutionOptions, ToolUseLoopOptions, ToolUseLoopResult, ToolUseLoopState, ToolUseLoopError, ToolUseLoopResultStatus } from '../types/types';
 import { loadProviders, LoadProvidersOptions } from '../config/config';
 import { extractJson as extractJsonUtil } from '../utils/json-extractor';
 import { executeWithRetry } from '../utils/retry';
@@ -1006,6 +1006,203 @@ export class AIClient {
     }
 
     return results;
+  }
+
+  /**
+   * 自动执行 Tool Use 循环
+   *
+   * @param messages - 初始对话消息
+   * @param options - 对话选项
+   * @param executor - 工具执行函数
+   * @param loopOptions - 循环控制选项
+   * @param logger - 可选的日志记录器
+   * @returns 循环结果
+   */
+  async executeToolUseLoop(
+    messages: ChatMessage[],
+    options: ChatOptions,
+    executor: ToolExecutor,
+    loopOptions?: ToolUseLoopOptions,
+    logger?: Logger
+  ): Promise<ToolUseLoopResult> {
+    const maxIterations = loopOptions?.maxIterations ?? 10;
+    const forceFinalize = loopOptions?.forceFinalize ?? true;
+    const timeout = loopOptions?.timeout ?? 120000;
+    const onStateChange = loopOptions?.onStateChange;
+    const onToolCall = loopOptions?.onToolCall;
+    const onToolResult = loopOptions?.onToolResult;
+    const shouldContinue = loopOptions?.shouldContinue;
+
+    const startTime = Date.now();
+    let currentMessages = [...messages];
+    let iterations = 0;
+    let toolCallsExecuted = 0;
+    let currentState: ToolUseLoopState = 'idle';
+
+    const setState = (state: ToolUseLoopState) => {
+      currentState = state;
+      onStateChange?.(state);
+    };
+
+    const buildResult = (
+      status: ToolUseLoopResultStatus,
+      response: ChatResponse,
+      error?: ToolUseLoopError
+    ): ToolUseLoopResult => ({
+      status,
+      response,
+      messages: currentMessages,
+      iterations,
+      toolCallsExecuted,
+      state: currentState,
+      error
+    });
+
+    try {
+      for (let iteration = 0; iteration < maxIterations; iteration++) {
+        iterations = iteration + 1;
+
+        // Check timeout
+        if (Date.now() - startTime > timeout) {
+          logger?.warn('Loop timeout exceeded');
+          const cleanedMessages = this.cleanupHangingToolCalls(currentMessages);
+          currentMessages = cleanedMessages;
+          setState('failed');
+          return buildResult('error', { text: '', stopReason: 'error', model: '', usage: undefined }, {
+            code: 'TIMEOUT',
+            message: `Loop exceeded timeout of ${timeout}ms`
+          });
+        }
+
+        // Check if last iteration
+        const isLastIteration = iteration === maxIterations - 1;
+
+        // Set state
+        setState('thinking');
+
+        // Prepare options (remove tools on last iteration if forceFinalize)
+        const currentOptions = isLastIteration && forceFinalize
+          ? { ...options, tools: undefined }
+          : options;
+
+        logger?.debug(`Loop iteration ${iteration + 1}/${maxIterations}`, {
+          isLastIteration,
+          forceFinalize: isLastIteration && forceFinalize
+        });
+
+        // Call AI
+        const response = await this.chatWithTools(currentMessages, currentOptions, logger);
+
+        // Check if no tool calls
+        if (!response.toolCalls || response.toolCalls.length === 0) {
+          logger?.debug('No tool calls, returning final response');
+          setState('completed');
+          return buildResult('completed', response);
+        }
+
+        // Check shouldContinue
+        if (shouldContinue && !shouldContinue(iteration, response)) {
+          logger?.debug('shouldContinue returned false, stopping loop');
+          const cleanedMessages = this.cleanupHangingToolCalls(currentMessages);
+          currentMessages = cleanedMessages;
+          setState('completed');
+          return buildResult('completed', response);
+        }
+
+        // Handle last iteration with tool calls
+        if (isLastIteration) {
+          if (forceFinalize) {
+            // Already removed tools, model still tried to call them
+            // This means model couldn't finalize, return as-is
+            logger?.warn('Model attempted tool call on final iteration');
+            setState('failed');
+            return buildResult('max_iterations', response, {
+              code: 'MAX_ITERATIONS',
+              message: 'Model attempted tool call on final iteration'
+            });
+          } else {
+            // Not forcing finalize, cleanup and return
+            logger?.warn('Max iterations reached with pending tool calls');
+            const cleanedMessages = this.cleanupHangingToolCalls(currentMessages);
+            currentMessages = cleanedMessages;
+            setState('failed');
+            return buildResult('max_iterations', response, {
+              code: 'MAX_ITERATIONS',
+              message: `Reached max iterations of ${maxIterations}`
+            });
+          }
+        }
+
+        // Add assistant message with tool calls
+        currentMessages.push({
+          role: 'assistant',
+          content: response.contentBlocks || [{ type: 'text', text: response.text }]
+        });
+
+        // Execute tools
+        setState('executing_tools');
+
+        for (const toolCall of response.toolCalls) {
+          onToolCall?.(toolCall);
+
+          logger?.debug(`Executing tool: ${toolCall.name}`, {
+            toolId: toolCall.id,
+            input: toolCall.input
+          });
+
+          const result = await this.executeToolWithRetry(
+            toolCall,
+            executor,
+            3,
+            { logger }
+          );
+
+          onToolResult?.(result);
+          toolCallsExecuted++;
+
+          // Build tool result message (inject error context on failure)
+          const errorMessage = result.success
+            ? result.result
+            : `工具执行失败，错误原因：${result.error}，请尝试其他方法或告知用户`;
+
+          const toolResultMessage = AIClient.buildToolResultMessage(
+            toolCall.id,
+            errorMessage,
+            !result.success
+          );
+
+          currentMessages.push(toolResultMessage);
+
+          logger?.debug(`Tool result added`, {
+            toolName: toolCall.name,
+            success: result.success
+          });
+        }
+
+        // Processing results
+        setState('processing_results');
+
+        logger?.debug(`Iteration ${iteration + 1} complete`, {
+          toolCallsExecuted,
+          totalMessages: currentMessages.length
+        });
+      }
+
+      // Should not reach here, but just in case
+      setState('completed');
+      return buildResult('completed', { text: '', stopReason: 'end_turn', model: '', usage: undefined });
+
+    } catch (error) {
+      logger?.error('Loop failed with error', { error });
+      const cleanedMessages = this.cleanupHangingToolCalls(currentMessages);
+      currentMessages = cleanedMessages;
+      setState('failed');
+      return buildResult('error', { text: '', stopReason: 'error', model: '', usage: undefined }, {
+        code: 'UNKNOWN',
+        message: error instanceof Error ? error.message : String(error),
+        originalError: error instanceof Error ? error : new Error(String(error))
+      });
+    }
   }
 
   /**

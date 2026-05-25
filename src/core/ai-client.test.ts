@@ -1,5 +1,5 @@
 import { AIClient } from './ai-client';
-import { UsageStats, ProviderConfig, ChatMessage, ChatResponse, ChatResponseWithTools, ToolDefinition, StreamInterruptedError, ToolResultBlock, FormatOptions, ToolUseBlock, NonRetryableError, ContentBlock, ParallelExecutionOptions } from '../types/types';
+import { UsageStats, ProviderConfig, ChatMessage, ChatResponse, ChatResponseWithTools, ToolDefinition, StreamInterruptedError, ToolResultBlock, FormatOptions, ToolUseBlock, NonRetryableError, ContentBlock, ParallelExecutionOptions, ToolUseLoopState } from '../types/types';
 import { loadProviders } from '../config/config';
 import { extractJson } from '../utils/json-extractor';
 import { executeWithRetry } from '../utils/retry';
@@ -1287,6 +1287,241 @@ describe('AIClient', () => {
 
       expect(onBatchStart).toHaveBeenCalled();
       expect(onBatchEnd).toHaveBeenCalled();
+    });
+  });
+
+  describe('AIClient - executeToolUseLoop', () => {
+    let ai: AIClient;
+
+    beforeEach(() => {
+      ai = new AIClient({
+        providers: {
+          anthropic: {
+            baseURL: 'https://api.anthropic.com',
+            authToken: 'test-key',
+            authType: 'apiKey',
+            models: ['claude-3-5-sonnet-20241022']
+          }
+        }
+      });
+    });
+
+    test('should return completed when no tool calls', async () => {
+      // Mock chatWithTools to return response without tool calls
+      jest.spyOn(ai, 'chatWithTools').mockResolvedValueOnce({
+        text: 'Final response',
+        stopReason: 'end_turn',
+        model: 'claude-3-5-sonnet-20241022',
+        usage: { inputTokens: 10, outputTokens: 5 }
+      });
+
+      const executor = jest.fn();
+      const result = await ai.executeToolUseLoop(
+        [{ role: 'user', content: 'Hello' }],
+        {},
+        executor
+      );
+
+      expect(result.status).toBe('completed');
+      expect(result.response.text).toBe('Final response');
+      expect(result.iterations).toBe(1);
+      expect(result.toolCallsExecuted).toBe(0);
+    });
+
+    test('should execute tool calls and continue loop', async () => {
+      const executor = jest.fn()
+        .mockResolvedValueOnce({ data: 'tool result' })
+        .mockResolvedValueOnce({ data: 'final' });
+
+      // First call: return tool call
+      jest.spyOn(ai, 'chatWithTools')
+        .mockResolvedValueOnce({
+          text: '',
+          stopReason: 'tool_use',
+          model: 'claude-3-5-sonnet-20241022',
+          usage: { inputTokens: 10, outputTokens: 5 },
+          toolCalls: [
+            { type: 'tool_use', id: 'tool_1', name: 'test_tool', input: {} }
+          ],
+          contentBlocks: [
+            { type: 'tool_use', id: 'tool_1', name: 'test_tool', input: {} }
+          ]
+        })
+        // Second call: return final response
+        .mockResolvedValueOnce({
+          text: 'Final response after tool',
+          stopReason: 'end_turn',
+          model: 'claude-3-5-sonnet-20241022',
+          usage: { inputTokens: 20, outputTokens: 10 }
+        });
+
+      const result = await ai.executeToolUseLoop(
+        [{ role: 'user', content: 'Test' }],
+        {},
+        executor
+      );
+
+      expect(result.status).toBe('completed');
+      expect(result.iterations).toBe(2);
+      expect(result.toolCallsExecuted).toBe(1);
+      expect(result.messages).toHaveLength(3); // user + assistant + tool_result
+    });
+
+    test('should stop on max iterations', async () => {
+      const executor = jest.fn().mockResolvedValue({ data: 'result' });
+
+      // Always return tool calls
+      jest.spyOn(ai, 'chatWithTools').mockResolvedValue({
+        text: '',
+        stopReason: 'tool_use',
+        model: 'claude-3-5-sonnet-20241022',
+        usage: { inputTokens: 10, outputTokens: 5 },
+        toolCalls: [
+          { type: 'tool_use', id: 'tool_1', name: 'test_tool', input: {} }
+        ],
+        contentBlocks: [
+          { type: 'tool_use', id: 'tool_1', name: 'test_tool', input: {} }
+        ]
+      });
+
+      const result = await ai.executeToolUseLoop(
+        [{ role: 'user', content: 'Test' }],
+        {},
+        executor,
+        { maxIterations: 2, forceFinalize: false }
+      );
+
+      expect(result.status).toBe('max_iterations');
+      expect(result.iterations).toBe(2);
+    });
+
+    test('should trigger state change callbacks', async () => {
+      jest.spyOn(ai, 'chatWithTools').mockResolvedValueOnce({
+        text: 'Final response',
+        stopReason: 'end_turn',
+        model: 'claude-3-5-sonnet-20241022',
+        usage: { inputTokens: 10, outputTokens: 5 }
+      });
+
+      const stateChanges: ToolUseLoopState[] = [];
+      const result = await ai.executeToolUseLoop(
+        [{ role: 'user', content: 'Test' }],
+        {},
+        jest.fn(),
+        {
+          onStateChange: (state) => stateChanges.push(state)
+        }
+      );
+
+      expect(stateChanges).toContain('thinking');
+      expect(stateChanges).toContain('completed');
+    });
+
+    test('should trigger tool callbacks', async () => {
+      const executor = jest.fn().mockResolvedValue({ data: 'result' });
+
+      jest.spyOn(ai, 'chatWithTools')
+        .mockResolvedValueOnce({
+          text: '',
+          stopReason: 'tool_use',
+          model: 'claude-3-5-sonnet-20241022',
+          usage: { inputTokens: 10, outputTokens: 5 },
+          toolCalls: [
+            { type: 'tool_use', id: 'tool_1', name: 'test_tool', input: { a: 1 } }
+          ],
+          contentBlocks: [
+            { type: 'tool_use', id: 'tool_1', name: 'test_tool', input: { a: 1 } }
+          ]
+        })
+        .mockResolvedValueOnce({
+          text: 'Done',
+          stopReason: 'end_turn',
+          model: 'claude-3-5-sonnet-20241022',
+          usage: { inputTokens: 20, outputTokens: 10 }
+        });
+
+      const toolCalls: any[] = [];
+      const toolResults: any[] = [];
+
+      await ai.executeToolUseLoop(
+        [{ role: 'user', content: 'Test' }],
+        {},
+        executor,
+        {
+          onToolCall: (tc) => toolCalls.push(tc),
+          onToolResult: (r) => toolResults.push(r)
+        }
+      );
+
+      expect(toolCalls).toHaveLength(1);
+      expect(toolCalls[0].name).toBe('test_tool');
+      expect(toolResults).toHaveLength(1);
+      expect(toolResults[0].success).toBe(true);
+    });
+
+    test('should respect shouldContinue callback', async () => {
+      const executor = jest.fn().mockResolvedValue({ data: 'result' });
+
+      jest.spyOn(ai, 'chatWithTools').mockResolvedValue({
+        text: '',
+        stopReason: 'tool_use',
+        model: 'claude-3-5-sonnet-20241022',
+        usage: { inputTokens: 10, outputTokens: 5 },
+        toolCalls: [
+          { type: 'tool_use', id: 'tool_1', name: 'test_tool', input: {} }
+        ],
+        contentBlocks: [
+          { type: 'tool_use', id: 'tool_1', name: 'test_tool', input: {} }
+        ]
+      });
+
+      const result = await ai.executeToolUseLoop(
+        [{ role: 'user', content: 'Test' }],
+        {},
+        executor,
+        {
+          maxIterations: 10,
+          shouldContinue: (iteration) => iteration < 1
+        }
+      );
+
+      expect(result.status).toBe('completed');
+      expect(result.iterations).toBe(2);
+    });
+
+    test('should cleanup hanging tool calls on error', async () => {
+      const executor = jest.fn();
+
+      jest.spyOn(ai, 'chatWithTools')
+        .mockResolvedValueOnce({
+          text: '',
+          stopReason: 'tool_use',
+          model: 'claude-3-5-sonnet-20241022',
+          usage: { inputTokens: 10, outputTokens: 5 },
+          toolCalls: [
+            { type: 'tool_use', id: 'tool_1', name: 'test_tool', input: {} }
+          ],
+          contentBlocks: [
+            { type: 'tool_use', id: 'tool_1', name: 'test_tool', input: {} }
+          ]
+        })
+        .mockRejectedValueOnce(new Error('API failed'));
+
+      const result = await ai.executeToolUseLoop(
+        [{ role: 'user', content: 'Test' }],
+        {},
+        executor,
+        { maxIterations: 2 }
+      );
+
+      expect(result.status).toBe('error');
+      expect(result.error?.code).toBe('UNKNOWN');
+      // Should cleanup hanging tool_use
+      const lastMsg = result.messages[result.messages.length - 1];
+      if (lastMsg.role === 'assistant' && Array.isArray(lastMsg.content)) {
+        const toolUseBlocks = lastMsg.content.filter(b => b.type === 'tool_use');
+        expect(toolUseBlocks).toHaveLength(0);
+      }
     });
   });
 });
