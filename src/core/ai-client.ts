@@ -1,4 +1,4 @@
-import { UsageStats, Usage, ProviderConfig, ChatMessage, ChatResponse, ChatOptions, Logger, ChatResponseWithTools, ToolDefinition, ToolUseBlock, ContentBlock, StreamInterruptedError, ToolResultBlock, FormatOptions } from '../types/types';
+import { UsageStats, Usage, ProviderConfig, ChatMessage, ChatResponse, ChatOptions, Logger, ChatResponseWithTools, ToolDefinition, ToolUseBlock, ContentBlock, StreamInterruptedError, ToolResultBlock, FormatOptions, StreamEventCallback } from '../types/types';
 import { loadProviders, LoadProvidersOptions } from '../config/config';
 import { extractJson as extractJsonUtil } from '../utils/json-extractor';
 import { executeWithRetry } from '../utils/retry';
@@ -548,12 +548,14 @@ export class AIClient {
    *
    * @param messages - 对话消息列表
    * @param options - 对话选项（包含工具定义）
+   * @param onEvent - 可选的流事件回调函数
    * @param logger - 可选的日志记录器
    * @returns 包含工具调用的对话响应
    */
   async chatStream(
     messages: ChatMessage[],
     options?: ChatOptions,
+    onEvent?: StreamEventCallback,
     logger?: Logger
   ): Promise<ChatResponseWithTools> {
     logger?.debug('Starting chatStream', { messages, options });
@@ -604,13 +606,39 @@ export class AIClient {
     const contentBlocks: ContentBlock[] = [];
     const partialResponse: Partial<ChatResponseWithTools> = {};
 
+    // Safe event trigger with exception isolation
+    let hasEmittedError = false;
+
+    const safeTriggerEvent = (event: any) => {
+      if (hasEmittedError && event.type === 'stream_error') return;
+      if (event.type === 'stream_error') hasEmittedError = true;
+
+      try {
+        onEvent?.(event);
+      } catch (error) {
+        logger?.error('Stream event callback error', { error, event });
+      }
+    };
+
     try {
       // 创建流式请求
       const stream = await client.messages.stream(requestParams);
 
+      // Track if stream_start has been emitted
+      let hasEmittedStart = false;
+
       // 处理流事件
       for await (const event of stream) {
         logger?.debug('Stream event', { event });
+
+        // Trigger stream_start on first event
+        if (!hasEmittedStart) {
+          safeTriggerEvent({
+            type: 'stream_start',
+            model: model  // Use the resolved model
+          });
+          hasEmittedStart = true;
+        }
 
         if (event.type === 'content_block_start') {
           const block = event.content_block;
@@ -619,12 +647,18 @@ export class AIClient {
               type: 'text',
               text: '',
             });
+            safeTriggerEvent({ type: 'text', delta: '' });
           } else if (block.type === 'tool_use') {
             contentBlocks.push({
               type: 'tool_use',
               id: block.id,
               name: block.name,
               input: {},
+            });
+            safeTriggerEvent({
+              type: 'tool_use_start',
+              toolName: block.name,
+              toolId: block.id
             });
           }
         } else if (event.type === 'content_block_delta') {
@@ -634,6 +668,7 @@ export class AIClient {
           if (delta.type === 'text_delta' && contentBlocks[index]) {
             const textBlock = contentBlocks[index] as { type: 'text'; text: string };
             textBlock.text += delta.text;
+            safeTriggerEvent({ type: 'text', delta: delta.text });
           } else if (delta.type === 'input_json_delta' && contentBlocks[index]) {
             const toolBlock = contentBlocks[index] as ToolUseBlock;
             // 累积 JSON 输入（partial_json 字段包含部分 JSON）
@@ -641,12 +676,25 @@ export class AIClient {
               // Note: SDK provides partial JSON string that needs to be accumulated
               // For now, we'll parse the final input from finalMessage
               logger?.debug('Partial JSON received', { partialJson: delta.partial_json });
+              safeTriggerEvent({
+                type: 'tool_use_input',
+                toolId: toolBlock.id,
+                partialInput: delta.partial_json
+              });
             } catch (e) {
               logger?.warn('Failed to process partial JSON', { e });
             }
           }
         } else if (event.type === 'content_block_stop') {
           logger?.debug('Content block stopped', { index: event.index });
+          const block = contentBlocks[event.index];
+          if (block && block.type === 'tool_use') {
+            safeTriggerEvent({
+              type: 'tool_use_end',
+              toolId: (block as ToolUseBlock).id,
+              partialInput: (block as ToolUseBlock).input
+            });
+          }
         }
       }
 
@@ -654,6 +702,16 @@ export class AIClient {
       const finalMessage = await stream.finalMessage();
 
       logger?.debug('Stream completed', { finalMessage });
+
+      // Trigger stream_end
+      safeTriggerEvent({
+        type: 'stream_end',
+        model: finalMessage.model,
+        usage: {
+          inputTokens: finalMessage.usage.input_tokens,
+          outputTokens: finalMessage.usage.output_tokens
+        }
+      });
 
       // 从 finalMessage 中提取完整的内容块（替换部分累积的数据）
       const finalContentBlocks: ContentBlock[] = finalMessage.content.map(block => {
@@ -716,6 +774,12 @@ export class AIClient {
       return chatResponse;
     } catch (error) {
       logger?.error('ChatStream failed', { error });
+
+      // Trigger stream_error
+      safeTriggerEvent({
+        type: 'stream_error',
+        error: error instanceof Error ? error : new Error(String(error))
+      });
 
       // 更新失败统计
       this.incrementFailedCalls();
