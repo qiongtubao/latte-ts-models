@@ -29,6 +29,7 @@ export interface ProviderConfig {
   baseURL: string;                              // API 服务地址
   authToken?: string;                           // 认证令牌
   authType: 'apiKey' | 'authToken';             // 认证方式
+  protocol?: 'anthropic' | 'openai';            // 协议类型，默认 'anthropic'
   models: string[] | Record<string, ModelConfig>; // 可用模型
   maxTokens?: number;                           // 最大 Token 限制
 }
