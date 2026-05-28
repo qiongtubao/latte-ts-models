@@ -24,6 +24,7 @@ export interface ProviderConfig {
   baseURL: string;
   authType: 'apiKey' | 'authToken';
   authToken: string;
+  protocol?: 'anthropic' | 'openai';
   models: string[] | Record<string, ModelConfig>;
   maxTokens?: number;
 }
