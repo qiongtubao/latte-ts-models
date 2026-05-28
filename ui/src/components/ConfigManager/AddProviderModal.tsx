@@ -18,6 +18,14 @@ export default function AddProviderModal({ onAdd, onClose }: Props) {
   const [baseURL, setBaseURL] = useState('https://api.anthropic.com');
   const [authType, setAuthType] = useState<'apiKey' | 'authToken'>('apiKey');
   const [authToken, setAuthToken] = useState('');
+  const [protocol, setProtocol] = useState<'anthropic' | 'openai'>('anthropic');
+
+  const detectProtocol = (url: string): 'anthropic' | 'openai' => {
+    const lower = url.toLowerCase();
+    if (lower.includes('openai')) return 'openai';
+    if (lower.includes('anthropic')) return 'anthropic';
+    return 'anthropic';
+  };
 
   // Models: simple = comma-separated names, advanced = per-model config
   const [modelsMode, setModelsMode] = useState<'simple' | 'advanced'>('simple');
@@ -57,7 +65,7 @@ export default function AddProviderModal({ onAdd, onClose }: Props) {
       models = obj;
     }
 
-    onAdd(name, { baseURL, authType, authToken, models });
+    onAdd(name, { baseURL, authType, authToken, protocol, models });
   };
 
   return (
@@ -71,7 +79,10 @@ export default function AddProviderModal({ onAdd, onClose }: Props) {
         </div>
         <div className="form-group">
           <label>Base URL</label>
-          <input value={baseURL} onChange={e => setBaseURL(e.target.value)} />
+          <input value={baseURL} onChange={e => {
+            setBaseURL(e.target.value);
+            setProtocol(detectProtocol(e.target.value));
+          }} />
         </div>
         <div className="form-group">
           <label>Auth Type</label>
@@ -83,6 +94,19 @@ export default function AddProviderModal({ onAdd, onClose }: Props) {
         <div className="form-group">
           <label>API Key</label>
           <input type="password" value={authToken} onChange={e => setAuthToken(e.target.value)} />
+        </div>
+
+        <div className="form-group">
+          <label>协议</label>
+          <select value={protocol} onChange={e => setProtocol(e.target.value as 'anthropic' | 'openai')}>
+            <option value="anthropic">Anthropic</option>
+            <option value="openai">OpenAI</option>
+          </select>
+          {!baseURL.includes('openai') && !baseURL.includes('anthropic') && (
+            <div style={{ fontSize: 12, color: '#888', marginTop: 4 }}>
+              未识别的服务商，已默认 Anthropic 协议，请根据实际情况调整
+            </div>
+          )}
         </div>
 
         <div className="form-group">

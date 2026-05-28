@@ -35,6 +35,7 @@ export default function ProviderCard({ name, provider, onSave, onDelete }: Props
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<ProviderConfig>({ ...provider });
   const [showKey, setShowKey] = useState(false);
+  const [protocol, setProtocol] = useState<'anthropic' | 'openai'>(provider.protocol || 'anthropic');
 
   // Sync form when provider changes externally
   useState(() => { setForm({ ...provider }); });
@@ -74,7 +75,7 @@ export default function ProviderCard({ name, provider, onSave, onDelete }: Props
       }
       models = obj;
     }
-    onSave({ ...form, models });
+    onSave({ ...form, models, protocol });
     setEditing(false);
   };
 
@@ -115,6 +116,13 @@ export default function ProviderCard({ name, provider, onSave, onDelete }: Props
                 {showKey ? '隐藏' : '显示'}
               </button>
             </div>
+          </div>
+          <div className="form-group">
+            <label>协议</label>
+            <select value={protocol} onChange={e => setProtocol(e.target.value as 'anthropic' | 'openai')}>
+              <option value="anthropic">Anthropic</option>
+              <option value="openai">OpenAI</option>
+            </select>
           </div>
 
           <div className="form-group">
@@ -200,6 +208,20 @@ export default function ProviderCard({ name, provider, onSave, onDelete }: Props
         <div>
           <p><strong>Base URL:</strong> {provider.baseURL}</p>
           <p><strong>Auth:</strong> {provider.authType} | Key: ****</p>
+          <p>
+            <strong>协议:</strong>{' '}
+            <span style={{
+              display: 'inline-block',
+              padding: '2px 8px',
+              borderRadius: 4,
+              fontSize: 12,
+              fontWeight: 600,
+              background: (provider.protocol || 'anthropic') === 'openai' ? '#e3f2fd' : '#f3e5f5',
+              color: (provider.protocol || 'anthropic') === 'openai' ? '#1565c0' : '#7b1fa2',
+            }}>
+              {(provider.protocol || 'anthropic') === 'openai' ? 'OpenAI' : 'Anthropic'}
+            </span>
+          </p>
           <div>
             <strong>Models:</strong>
             {isObjModels(provider.models) ? (
