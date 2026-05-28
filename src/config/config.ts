@@ -61,6 +61,20 @@ function loadFromEnv(result: Record<string, ProviderConfig>): void {
       models: model ? [model] : ['claude-sonnet-4-20250514'],
     };
   }
+
+  // OpenAI 环境变量
+  const openaiApiKey = process.env.OPENAI_API_KEY;
+  if (openaiApiKey) {
+    const openaiBaseURL = process.env.OPENAI_BASE_URL || 'https://api.openai.com';
+    const openaiModel = process.env.OPENAI_MODEL || 'gpt-4o';
+    result.openai = {
+      baseURL: openaiBaseURL,
+      authType: 'apiKey',
+      authToken: openaiApiKey,
+      protocol: 'openai',
+      models: [openaiModel],
+    };
+  }
 }
 
 /**
