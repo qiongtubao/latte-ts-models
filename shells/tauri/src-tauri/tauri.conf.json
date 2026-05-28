@@ -1,0 +1,17 @@
+{
+  "build": {
+    "devPath": "http://localhost:5173",
+    "distDir": "../../../dist-ui"
+  },
+  "package": {
+    "productName": "latte-ts-models",
+    "version": "1.0.0"
+  },
+  "tauri": {
+    "allowlist": { "all": false, "shell": { "open": true } },
+    "bundle": { "active": true, "icon": [], "identifier": "com.latte.models" },
+    "windows": [
+      { "title": "latte-ts-models", "width": 1200, "height": 800 }
+    ]
+  }
+}

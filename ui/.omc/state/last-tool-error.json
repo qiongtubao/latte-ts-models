@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"cd ui && npm run build 2>&1\",\"timeout\":120000,\"description\":\"Build UI\"}",
+  "error": "Exit code 1\n(eval):cd:1: no such file or directory: ui",
+  "timestamp": "2026-05-28T14:12:55.906Z",
+  "retry_count": 2
+}
