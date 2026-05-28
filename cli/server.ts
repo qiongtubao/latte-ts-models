@@ -176,9 +176,10 @@ export function createServer(port: number = 3456) {
         send({ type: 'progress', phase: 'generating', scenario, windowSize, current: i, total });
         const generated = generateScenario(scenario as QualityScenario, windowSize);
 
-        // Phase 2: Ask LLM (stream answer back to frontend)
+        // Phase 2: Ask LLM (stream first, fall back to non-streaming)
         send({ type: 'progress', phase: 'asking', scenario, windowSize, current: i, total });
         let answer = '';
+        let streamFailed = false;
         try {
           const response = await client.chatStream(
             [{ role: 'user', content: generated.prompt }],
@@ -191,15 +192,23 @@ export function createServer(port: number = 3456) {
             }
           );
         } catch (askErr: any) {
-          results.push({
-            scenario,
-            windowSize,
-            scores: {},
-            status: 'error',
-            errorMessage: `模型调用失败: ${askErr.message}`,
-          });
-          send({ type: 'result', result: results[results.length - 1] });
-          continue;
+          // Streaming failed — try non-streaming fallback
+          streamFailed = true;
+          try {
+            send({ type: 'text', delta: '(流式失败，使用非流式模式)...\n' });
+            answer = await client.query(generated.prompt, { model: modelRef });
+            send({ type: 'text', delta: answer });
+          } catch (fallbackErr: any) {
+            results.push({
+              scenario,
+              windowSize,
+              scores: {},
+              status: 'error',
+              errorMessage: `模型调用失败: ${askErr.message}`,
+            });
+            send({ type: 'result', result: results[results.length - 1] });
+            continue;
+          }
         }
 
         // Phase 3: Judge the answer

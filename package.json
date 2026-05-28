@@ -42,7 +42,6 @@
   "license": "MIT",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
-    "@rollup/rollup-darwin-x64": "^4.60.4",
     "commander": "^14.0.3",
     "cors": "^2.8.6",
     "express": "^5.2.1",
