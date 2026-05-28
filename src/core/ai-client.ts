@@ -1,7 +1,6 @@
-import { UsageStats, Usage, ProviderConfig, ChatMessage, ChatResponse, ChatOptions, Logger, ChatResponseWithTools, ToolDefinition, ToolUseBlock, ContentBlock, StreamInterruptedError, ToolResultBlock, FormatOptions, StreamEventCallback, ToolExecutor, ToolExecutionResult, RetryEvent, NonRetryableError, ParallelExecutionOptions, ToolUseLoopOptions, ToolUseLoopResult, ToolUseLoopState, ToolUseLoopError, ToolUseLoopResultStatus } from '../types/types';
+import { UsageStats, Usage, ProviderConfig, ChatMessage, ChatResponse, ChatOptions, Logger, ChatResponseWithTools, ToolUseBlock, FormatOptions, StreamEventCallback, ToolExecutor, ToolExecutionResult, RetryEvent, ParallelExecutionOptions, ToolUseLoopOptions, ToolUseLoopResult, ToolUseLoopState, ToolUseLoopResultStatus, ToolUseLoopError } from '../types/types';
 import { loadProviders, LoadProvidersOptions } from '../config/config';
 import { extractJson as extractJsonUtil } from '../utils/json-extractor';
-import Anthropic from '@anthropic-ai/sdk';
 import { IChatAdapter, IToolUseAdapter, isToolUseAdapter } from '../adapters/IChatAdapter';
 import { AnthropicAdapter } from '../adapters/AnthropicAdapter';
 import { OpenAIAdapter } from '../adapters/OpenAIAdapter';
@@ -240,19 +239,6 @@ export class AIClient {
   }
 
   /**
-   * 创建 Anthropic SDK 客户端
-   *
-   * @param config - Provider 配置
-   * @returns Anthropic 客户端实例
-   */
-  private createAnthropicClient(config: ProviderConfig): Anthropic {
-    return new Anthropic({
-      baseURL: config.baseURL,
-      apiKey: config.authToken,
-    });
-  }
-
-  /**
    * 单轮查询
    *
    * @param prompt - 用户提示
@@ -406,6 +392,8 @@ export class AIClient {
   /**
    * 执行工具调用并自动重试
    *
+   * 委托给 AnthropicAdapter 的静态方法执行。
+   *
    * @param toolCall - 工具调用信息
    * @param executor - 工具执行函数
    * @param maxRetries - 最大重试次数（默认 3）
@@ -421,73 +409,7 @@ export class AIClient {
       onRetry?: (event: RetryEvent) => void;
     }
   ): Promise<ToolExecutionResult> {
-    const logger = options?.logger;
-    const onRetry = options?.onRetry;
-
-    let lastError: Error | null = null;
-
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        logger?.debug(`Executing tool (attempt ${attempt}/${maxRetries})`, {
-          toolName: toolCall.name,
-          toolId: toolCall.id,
-          input: toolCall.input,
-        });
-
-        const result = await executor(toolCall.name, toolCall.input, {
-          attempt,
-          maxRetries,
-          toolId: toolCall.id
-        });
-
-        logger?.debug('Tool execution successful', {
-          toolName: toolCall.name,
-          attempt,
-        });
-
-        return { success: true, result };
-      } catch (error) {
-        lastError = error instanceof Error ? error : new Error(String(error));
-
-        logger?.warn(`Tool execution failed (attempt ${attempt}/${maxRetries})`, {
-          toolName: toolCall.name,
-          error: lastError.message,
-        });
-
-        // If non-retryable error, break immediately
-        if (error instanceof NonRetryableError) {
-          logger?.error('Tool execution failed with non-retryable error', {
-            toolName: toolCall.name,
-            error: lastError.message,
-          });
-          break;
-        }
-
-        // Wait with exponential backoff before retry
-        if (attempt < maxRetries) {
-          const delay = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
-
-          // Trigger retry callback
-          onRetry?.({
-            toolName: toolCall.name,
-            toolId: toolCall.id,
-            attempt,
-            maxRetries,
-            delay,
-            error: lastError
-          });
-
-          logger?.debug(`Waiting ${delay}ms before retry`);
-          await new Promise(resolve => setTimeout(resolve, delay));
-        }
-      }
-    }
-
-    return {
-      success: false,
-      error: lastError?.message || 'Unknown error',
-      isSystemError: true
-    };
+    return AnthropicAdapter.executeToolWithRetry(toolCall, executor, maxRetries, options);
   }
 
   /**
@@ -504,19 +426,34 @@ export class AIClient {
     options?: ParallelExecutionOptions,
     logger?: Logger
   ): Promise<Map<string, ToolExecutionResult>> {
-    // 使用第一个可用的 provider 的适配器来执行工具
+    // Find the first provider whose adapter supports tool use
     const providerNames = Object.keys(this.providers);
     if (providerNames.length === 0) {
       throw new Error('No providers configured for tool execution');
     }
-    // executeToolsParallel 默认使用 AnthropicAdapter
-    const adapter = this.getToolUseAdapter(providerNames[0]);
+
+    let adapter: IChatAdapter & IToolUseAdapter | null = null;
+    for (const providerName of providerNames) {
+      const a = this.getOrCreateAdapter(providerName);
+      if (isToolUseAdapter(a)) {
+        adapter = a;
+        break;
+      }
+    }
+
+    if (!adapter) {
+      throw new Error('No providers configured with tool use support');
+    }
+
     const result = await adapter.executeToolsParallel(toolCalls, executor, options);
     return result;
   }
 
   /**
    * 自动执行 Tool Use 循环
+   *
+   * 循环逻辑保留在 AIClient 以支持模型解析和用量统计；
+   * 每次对话通过 chatWithTools() 委托给适配器。
    *
    * @param messages - 初始对话消息
    * @param options - 对话选项
@@ -572,8 +509,7 @@ export class AIClient {
         // Check timeout
         if (Date.now() - startTime > timeout) {
           logger?.warn('Loop timeout exceeded');
-          const cleanedMessages = this.cleanupHangingToolCalls(currentMessages);
-          currentMessages = cleanedMessages;
+          currentMessages = this.cleanupHangingToolCalls(currentMessages);
           setState('failed');
           return buildResult('error', { text: '', stopReason: 'error', model: '', usage: undefined }, {
             code: 'TIMEOUT',
@@ -597,7 +533,7 @@ export class AIClient {
           forceFinalize: isLastIteration && forceFinalize
         });
 
-        // Call AI
+        // Call AI via chatWithTools (delegates to adapter)
         const response = await this.chatWithTools(currentMessages, currentOptions, logger);
 
         // Check if no tool calls
@@ -610,8 +546,7 @@ export class AIClient {
         // Check shouldContinue
         if (shouldContinue && !shouldContinue(iteration, response)) {
           logger?.debug('shouldContinue returned false, stopping loop');
-          const cleanedMessages = this.cleanupHangingToolCalls(currentMessages);
-          currentMessages = cleanedMessages;
+          currentMessages = this.cleanupHangingToolCalls(currentMessages);
           setState('completed');
           return buildResult('completed', response);
         }
@@ -619,8 +554,6 @@ export class AIClient {
         // Handle last iteration with tool calls
         if (isLastIteration) {
           if (forceFinalize) {
-            // Already removed tools, model still tried to call them
-            // This means model couldn't finalize, return as-is
             logger?.warn('Model attempted tool call on final iteration');
             setState('failed');
             return buildResult('max_iterations', response, {
@@ -628,10 +561,8 @@ export class AIClient {
               message: 'Model attempted tool call on final iteration'
             });
           } else {
-            // Not forcing finalize, cleanup and return
             logger?.warn('Max iterations reached with pending tool calls');
-            const cleanedMessages = this.cleanupHangingToolCalls(currentMessages);
-            currentMessages = cleanedMessages;
+            currentMessages = this.cleanupHangingToolCalls(currentMessages);
             setState('failed');
             return buildResult('max_iterations', response, {
               code: 'MAX_ITERATIONS',
@@ -646,7 +577,7 @@ export class AIClient {
           content: response.contentBlocks || [{ type: 'text', text: response.text }]
         });
 
-        // Execute tools
+        // Execute tools via AnthropicAdapter static method
         setState('executing_tools');
 
         for (const toolCall of response.toolCalls) {
@@ -667,7 +598,6 @@ export class AIClient {
           onToolResult?.(result);
           toolCallsExecuted++;
 
-          // Build tool result message (inject error context on failure)
           const errorMessage = result.success
             ? result.result
             : `工具执行失败，错误原因：${result.error}，请尝试其他方法或告知用户`;
@@ -701,8 +631,7 @@ export class AIClient {
 
     } catch (error) {
       logger?.error('Loop failed with error', { error });
-      const cleanedMessages = this.cleanupHangingToolCalls(currentMessages);
-      currentMessages = cleanedMessages;
+      currentMessages = this.cleanupHangingToolCalls(currentMessages);
       setState('failed');
       return buildResult('error', { text: '', stopReason: 'error', model: '', usage: undefined }, {
         code: 'UNKNOWN',
@@ -714,68 +643,10 @@ export class AIClient {
 
   /**
    * 清理悬空的 tool_use 和孤立的 tool_result 消息块
+   *
+   * 委托给 AnthropicAdapter 的静态方法执行。
    */
   private cleanupHangingToolCalls(messages: ChatMessage[]): ChatMessage[] {
-    const cleaned = [...messages];
-
-    // Step 1: Find all tool_use IDs
-    const toolUseIds = new Set<string>();
-    for (const msg of cleaned) {
-      if (msg.role === 'assistant' && Array.isArray(msg.content)) {
-        for (const block of msg.content) {
-          if (block.type === 'tool_use') {
-            toolUseIds.add((block as ToolUseBlock).id);
-          }
-        }
-      }
-    }
-
-    // Step 2: Find all tool_result tool_use_ids
-    const toolResultIds = new Set<string>();
-    for (const msg of cleaned) {
-      if (msg.role === 'user' && Array.isArray(msg.content)) {
-        for (const block of msg.content) {
-          if (block.type === 'tool_result') {
-            toolResultIds.add((block as ToolResultBlock).tool_use_id);
-          }
-        }
-      }
-    }
-
-    // Step 3: Remove dangling tool_use blocks (no corresponding tool_result)
-    for (let i = 0; i < cleaned.length; i++) {
-      const msg = cleaned[i];
-      if (msg.role === 'assistant' && Array.isArray(msg.content)) {
-        const blocks = msg.content as ContentBlock[];
-        const cleanedBlocks = blocks.filter(block => {
-          if (block.type === 'tool_use') {
-            return toolResultIds.has((block as ToolUseBlock).id);
-          }
-          return true;
-        });
-        if (cleanedBlocks.length !== blocks.length) {
-          cleaned[i] = { ...msg, content: cleanedBlocks };
-        }
-      }
-    }
-
-    // Step 4: Remove orphaned tool_result blocks (no corresponding tool_use)
-    for (let i = 0; i < cleaned.length; i++) {
-      const msg = cleaned[i];
-      if (msg.role === 'user' && Array.isArray(msg.content)) {
-        const blocks = msg.content as ContentBlock[];
-        const cleanedBlocks = blocks.filter(block => {
-          if (block.type === 'tool_result') {
-            return toolUseIds.has((block as ToolResultBlock).tool_use_id);
-          }
-          return true;
-        });
-        if (cleanedBlocks.length !== blocks.length) {
-          cleaned[i] = { ...msg, content: cleanedBlocks };
-        }
-      }
-    }
-
-    return cleaned;
+    return AnthropicAdapter.cleanupHangingToolCalls(messages);
   }
 }

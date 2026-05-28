@@ -624,21 +624,29 @@ describe('AIClient', () => {
     });
   });
 
-  describe('createAnthropicClient (private method)', () => {
-    it('应该创建 Anthropic 客户端', () => {
+  describe('getOrCreateAdapter (private method)', () => {
+    it('应该为 anthropic 协议的 provider 创建 AnthropicAdapter', () => {
       const client = new AIClient();
       const clientAny = client as any;
 
-      const config = {
-        baseURL: 'https://api.anthropic.com',
-        authToken: 'test-key',
+      const mockProviders = {
+        testProvider: {
+          baseURL: 'https://api.anthropic.com',
+          authToken: 'test-key',
+          authType: 'apiKey',
+          protocol: 'anthropic',
+          models: ['claude-sonnet-4-20250514'],
+        },
       };
+      // Inject providers
+      (client as any).providers = mockProviders;
 
-      const anthropicClient = clientAny.createAnthropicClient(config);
+      const adapter = clientAny.getOrCreateAdapter('testProvider');
 
+      expect(adapter).toBeDefined();
       expect(Anthropic).toHaveBeenCalledWith({
-        baseURL: config.baseURL,
-        apiKey: config.authToken,
+        baseURL: 'https://api.anthropic.com',
+        apiKey: 'test-key',
       });
     });
   });

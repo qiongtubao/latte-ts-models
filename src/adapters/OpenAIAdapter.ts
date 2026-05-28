@@ -1,5 +1,5 @@
 import OpenAI from 'openai';
-import { ProviderConfig, ChatMessage, ChatOptions, ChatResponse, ChatResponseWithTools, ContentBlock, StreamEventCallback, StreamInterruptedError, Usage } from '../types/types';
+import { ProviderConfig, ChatMessage, ChatOptions, ChatResponse, ChatResponseWithTools, ContentBlock, StreamEventCallback, Usage, Logger } from '../types/types';
 import { IChatAdapter } from './IChatAdapter';
 
 /** OpenAI request params whitelist for fetch mode (Phase 1, no tools) */
@@ -20,7 +20,13 @@ export class OpenAIAdapter implements IChatAdapter {
     }
   }
 
-  /** Convert our ChatMessage[] to OpenAI format */
+  /**
+   * Convert our ChatMessage[] to OpenAI format.
+   *
+   * Phase 1 limitation: tool_use and tool_result blocks are silently discarded
+   * since OpenAIAdapter does not yet implement IToolUseAdapter. Messages containing
+   * tool blocks will lose conversation context. See Phase 2.
+   */
   private toOpenAIMessages(messages: ChatMessage[], systemPrompt?: string): any[] {
     const result: any[] = [];
     if (systemPrompt) result.push({ role: 'system', content: systemPrompt });
@@ -83,7 +89,11 @@ export class OpenAIAdapter implements IChatAdapter {
       stream: true,
     });
 
-    onEvent?.({ type: 'stream_start', model });
+    const safeEmit = (event: Parameters<StreamEventCallback>[0]) => {
+      try { onEvent?.(event); } catch (_) { /* isolate callback errors */ }
+    };
+
+    safeEmit({ type: 'stream_start', model });
     let fullText = '';
     let usage: Usage | undefined;
 
@@ -91,7 +101,7 @@ export class OpenAIAdapter implements IChatAdapter {
       const delta = chunk.choices[0]?.delta?.content;
       if (delta) {
         fullText += delta;
-        onEvent?.({ type: 'text', delta });
+        safeEmit({ type: 'text', delta });
       }
       if (chunk.usage) {
         usage = {
@@ -101,7 +111,7 @@ export class OpenAIAdapter implements IChatAdapter {
       }
     }
 
-    onEvent?.({ type: 'stream_end', model, usage });
+    safeEmit({ type: 'stream_end', model, usage });
 
     return {
       text: fullText,
@@ -178,7 +188,11 @@ export class OpenAIAdapter implements IChatAdapter {
       throw new Error(`OpenAI compatible endpoint returned ${res.status}: ${errBody}`);
     }
 
-    onEvent?.({ type: 'stream_start', model });
+    const safeEmit = (event: Parameters<StreamEventCallback>[0]) => {
+      try { onEvent?.(event); } catch (_) { /* isolate callback errors */ }
+    };
+
+    safeEmit({ type: 'stream_start', model });
     let fullText = '';
     let usage: Usage | undefined;
 
@@ -206,7 +220,7 @@ export class OpenAIAdapter implements IChatAdapter {
             const delta = chunk.choices[0]?.delta?.content;
             if (delta) {
               fullText += delta;
-              onEvent?.({ type: 'text', delta });
+              safeEmit({ type: 'text', delta });
             }
             if (chunk.usage) {
               usage = {
@@ -223,7 +237,7 @@ export class OpenAIAdapter implements IChatAdapter {
       reader.releaseLock();
     }
 
-    onEvent?.({ type: 'stream_end', model, usage });
+    safeEmit({ type: 'stream_end', model, usage });
 
     return {
       text: fullText,

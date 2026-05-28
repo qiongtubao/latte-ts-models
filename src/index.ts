@@ -1,6 +1,11 @@
 // Main client
 export { AIClient, AIClientOptions } from './core/ai-client';
 
+// Adapters
+export { AnthropicAdapter } from './adapters/AnthropicAdapter';
+export { OpenAIAdapter } from './adapters/OpenAIAdapter';
+export { IChatAdapter, IToolUseAdapter, isToolUseAdapter } from './adapters/IChatAdapter';
+
 // Types (Route layer + fundamental message types)
 export type {
   ProviderConfig,

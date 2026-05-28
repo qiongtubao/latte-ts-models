@@ -583,7 +583,7 @@ export class AnthropicAdapter implements IChatAdapter, IToolUseAdapter {
    * @param options - 可选配置
    * @returns 工具执行结果
    */
-  async executeToolWithRetry(
+  static async executeToolWithRetry(
     toolCall: ToolUseBlock,
     executor: ToolExecutor,
     maxRetries: number = 3,
@@ -741,7 +741,7 @@ export class AnthropicAdapter implements IChatAdapter, IToolUseAdapter {
 
       const batchPromises = batch.map(async (toolCall) => {
         try {
-          const result = await this.executeToolWithRetry(
+          const result = await AnthropicAdapter.executeToolWithRetry(
             toolCall,
             executor,
             3,
@@ -833,7 +833,7 @@ export class AnthropicAdapter implements IChatAdapter, IToolUseAdapter {
         // Check timeout
         if (Date.now() - startTime > timeout) {
           logger?.warn('Loop timeout exceeded');
-          const cleanedMessages = this.cleanupHangingToolCalls(currentMessages);
+          const cleanedMessages = AnthropicAdapter.cleanupHangingToolCalls(currentMessages);
           currentMessages = cleanedMessages;
           setState('failed');
           return buildResult('error', { text: '', stopReason: 'error', model: '', usage: undefined }, {
@@ -871,7 +871,7 @@ export class AnthropicAdapter implements IChatAdapter, IToolUseAdapter {
         // Check shouldContinue
         if (shouldContinue && !shouldContinue(iteration, response)) {
           logger?.debug('shouldContinue returned false, stopping loop');
-          const cleanedMessages = this.cleanupHangingToolCalls(currentMessages);
+          const cleanedMessages = AnthropicAdapter.cleanupHangingToolCalls(currentMessages);
           currentMessages = cleanedMessages;
           setState('completed');
           return buildResult('completed', response);
@@ -891,7 +891,7 @@ export class AnthropicAdapter implements IChatAdapter, IToolUseAdapter {
           } else {
             // Not forcing finalize, cleanup and return
             logger?.warn('Max iterations reached with pending tool calls');
-            const cleanedMessages = this.cleanupHangingToolCalls(currentMessages);
+            const cleanedMessages = AnthropicAdapter.cleanupHangingToolCalls(currentMessages);
             currentMessages = cleanedMessages;
             setState('failed');
             return buildResult('max_iterations', response, {
@@ -918,7 +918,7 @@ export class AnthropicAdapter implements IChatAdapter, IToolUseAdapter {
             input: toolCall.input
           });
 
-          const result = await this.executeToolWithRetry(
+          const result = await AnthropicAdapter.executeToolWithRetry(
             toolCall,
             executor,
             3,
@@ -962,7 +962,7 @@ export class AnthropicAdapter implements IChatAdapter, IToolUseAdapter {
 
     } catch (error) {
       logger?.error('Loop failed with error', { error });
-      const cleanedMessages = this.cleanupHangingToolCalls(currentMessages);
+      const cleanedMessages = AnthropicAdapter.cleanupHangingToolCalls(currentMessages);
       currentMessages = cleanedMessages;
       setState('failed');
       return buildResult('error', { text: '', stopReason: 'error', model: '', usage: undefined }, {
@@ -976,7 +976,7 @@ export class AnthropicAdapter implements IChatAdapter, IToolUseAdapter {
   /**
    * 清理悬空的 tool_use 和孤立的 tool_result 消息块
    */
-  private cleanupHangingToolCalls(messages: ChatMessage[]): ChatMessage[] {
+  static cleanupHangingToolCalls(messages: ChatMessage[]): ChatMessage[] {
     const cleaned = [...messages];
 
     // Step 1: Find all tool_use IDs

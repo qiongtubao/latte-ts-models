@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { ProviderConfig, ModelConfig } from '../../api/config';
 
 interface Props {
@@ -38,7 +38,10 @@ export default function ProviderCard({ name, provider, onSave, onDelete }: Props
   const [protocol, setProtocol] = useState<'anthropic' | 'openai'>(provider.protocol || 'anthropic');
 
   // Sync form when provider changes externally
-  useState(() => { setForm({ ...provider }); });
+  useEffect(() => {
+    setForm({ ...provider });
+    setProtocol(provider.protocol || 'anthropic');
+  }, [provider]);
 
   const defaultMode = isObjModels(provider.models) ? 'advanced' : 'simple';
   const [modelsMode, setModelsMode] = useState<'simple' | 'advanced'>(defaultMode);

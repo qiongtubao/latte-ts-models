@@ -1,4 +1,4 @@
-import { ChatMessage, ChatOptions, ChatResponse, ChatResponseWithTools, StreamEventCallback } from '../types/types';
+import { ChatMessage, ChatOptions, ChatResponse, ChatResponseWithTools, StreamEventCallback, ToolExecutor, ToolUseLoopOptions, ToolUseLoopResult, ToolUseBlock, ToolExecutionResult, ParallelExecutionOptions, Logger } from '../types/types';
 
 /**
  * Chat adapter interface — protocol-agnostic chat operations
@@ -24,15 +24,16 @@ export interface IToolUseAdapter {
   executeToolUseLoop(
     messages: ChatMessage[],
     options: ChatOptions,
-    executor: any,
-    loopOptions?: any
-  ): Promise<any>;
+    executor: ToolExecutor,
+    loopOptions?: ToolUseLoopOptions,
+    logger?: Logger
+  ): Promise<ToolUseLoopResult>;
 
   executeToolsParallel(
-    toolCalls: any[],
-    executor: any,
-    options?: any
-  ): Promise<Map<string, any>>;
+    toolCalls: ToolUseBlock[],
+    executor: ToolExecutor,
+    options?: ParallelExecutionOptions
+  ): Promise<Map<string, ToolExecutionResult>>;
 }
 
 /**
