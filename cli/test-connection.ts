@@ -177,6 +177,8 @@ function diagnose(httpTest: LayerTestResult, clientTest: LayerTestResult): Diagn
     return 'all_pass';
   }
   if (!httpTest.success && !clientTest.success) {
+    if (httpTest.statusCode === 429 || clientTest.statusCode === 429) return 'rate_limited';
+    if (httpTest.statusCode === 403 || clientTest.statusCode === 403) return 'content_policy_blocked';
     return 'connectivity_or_auth_failed';
   }
   // http passed, client failed — check status code
