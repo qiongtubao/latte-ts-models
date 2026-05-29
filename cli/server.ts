@@ -12,6 +12,7 @@ import {
   setJudgeConfig,
 } from './config-writer';
 import { AIClient } from '../src/core/ai-client';
+import { testConnection } from './test-connection';
 import { runBenchmark, BenchmarkResult } from './benchmark-runner';
 import { BUILTIN_ROLES, getRoleById, buildJudgePrompt, extractJudgeJson } from './role-system';
 import { generateScenario, QualityScenario } from './quality-scenarios';
@@ -72,6 +73,29 @@ export function createServer(port: number = 3456) {
   app.put('/api/config/judge', (req, res) => {
     setJudgeConfig(req.body);
     res.json({ success: true });
+  });
+
+  // ========== 测试连接 API ==========
+
+  app.post('/api/config/test-connection', async (req, res) => {
+    const { baseUrl, apiKey, protocol, model } = req.body;
+
+    if (!baseUrl || !apiKey || !model) {
+      res.status(400).json({ error: '缺少必要参数: baseUrl, apiKey, model' });
+      return;
+    }
+
+    try {
+      const result = await testConnection({
+        baseUrl,
+        apiKey,
+        protocol: protocol || 'anthropic',
+        model,
+      });
+      res.json(result);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
   });
 
   // ========== Benchmark API ==========
