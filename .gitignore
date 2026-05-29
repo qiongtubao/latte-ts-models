@@ -38,3 +38,5 @@ npm-debug.log*
 
 # Jest
 .jest-cache/
+.omc/
+

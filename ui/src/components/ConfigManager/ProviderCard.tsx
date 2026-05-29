@@ -49,9 +49,11 @@ export default function ProviderCard({ name, provider, onSave, onDelete }: Props
     Array.isArray(provider.models) ? provider.models.join(', ') : ''
   );
   const [modelEntries, setModelEntries] = useState<ModelEntry[]>(modelsToEntries(provider.models));
-  const [testState, setTestState] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
-  const [testResult, setTestResult] = useState<TestConnectionResult | null>(null);
-  const [fading, setFading] = useState(false);
+
+  // Per-model test state
+  const [testStates, setTestStates] = useState<Record<number, 'idle' | 'testing' | 'success' | 'error'>>({});
+  const [testResults, setTestResults] = useState<Record<number, TestConnectionResult | null>>({});
+  const [fadingModels, setFadingModels] = useState<Record<number, boolean>>({});
 
   const updateEntry = (i: number, field: keyof ModelEntry, value: string | boolean) => {
     setModelEntries(prev => prev.map((e, idx) => idx === i ? { ...e, [field]: value } : e));
@@ -73,20 +75,13 @@ export default function ProviderCard({ name, provider, onSave, onDelete }: Props
     client_layer_error: '网络和凭证正常，但内部处理异常，请联系技术支持',
   };
 
-  const getTestModel = (): string => {
-    if (modelsMode === 'simple') {
-      const first = modelsStr.split(',').map(s => s.trim()).filter(Boolean)[0];
-      return first || 'default';
-    }
-    const first = modelEntries.find(e => e.name.trim());
-    return first?.name.trim() || 'default';
-  };
+  const handleTestConnection = async (modelIndex: number) => {
+    const model = modelEntries[modelIndex]?.name.trim();
+    if (!model) return;
 
-  const handleTestConnection = async () => {
-    const model = getTestModel();
-    setTestState('testing');
-    setTestResult(null);
-    setFading(false);
+    setTestStates(prev => ({ ...prev, [modelIndex]: 'testing' }));
+    setTestResults(prev => ({ ...prev, [modelIndex]: null }));
+    setFadingModels(prev => ({ ...prev, [modelIndex]: false }));
     try {
       const result = await configApi.testConnection({
         baseUrl: form.baseURL,
@@ -94,19 +89,19 @@ export default function ProviderCard({ name, provider, onSave, onDelete }: Props
         protocol,
         model,
       });
-      setTestResult(result);
-      setTestState(result.success ? 'success' : 'error');
+      setTestResults(prev => ({ ...prev, [modelIndex]: result }));
+      setTestStates(prev => ({ ...prev, [modelIndex]: result.success ? 'success' : 'error' }));
       if (result.success) {
-        setTimeout(() => setFading(true), 3000);
+        setTimeout(() => setFadingModels(prev => ({ ...prev, [modelIndex]: true })), 3000);
       }
     } catch (err: any) {
-      setTestResult({
+      setTestResults(prev => ({ ...prev, [modelIndex]: {
         success: false,
         httpTest: { success: false, latencyMs: 0, error: err.message },
         clientTest: { success: false, latencyMs: 0, error: err.message },
         diagnosis: 'connectivity_or_auth_failed',
-      });
-      setTestState('error');
+      }}));
+      setTestStates(prev => ({ ...prev, [modelIndex]: 'error' }));
     }
   };
 
@@ -204,19 +199,19 @@ export default function ProviderCard({ name, provider, onSave, onDelete }: Props
               <label style={{ fontSize: 13, color: '#666', display: 'block', marginBottom: 8 }}>
                 模型配置（含参数）
               </label>
-              {modelEntries.map((e, i) => (
-                <div key={i} className="card" style={{ padding: 12, marginBottom: 8, background: '#fafafa' }}>
+              {modelEntries.map((entry, idx) => (
+                <div key={idx} className="card" style={{ padding: 12, marginBottom: 8, background: '#fafafa' }}>
                   <div style={{ display: 'flex', gap: 8, marginBottom: 6, alignItems: 'flex-end' }}>
                     <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
                       <label>模型名</label>
                       <input
                         placeholder="必填"
-                        value={e.name}
-                        onChange={ev => updateEntry(i, 'name', ev.target.value)}
+                        value={entry.name}
+                        onChange={ev => updateEntry(idx, 'name', ev.target.value)}
                       />
                     </div>
                     {modelEntries.length > 1 && (
-                      <button className="btn btn-sm btn-danger" onClick={() => removeEntry(i)} style={{ marginBottom: 2 }}>×</button>
+                      <button className="btn btn-sm btn-danger" onClick={() => removeEntry(idx)} style={{ marginBottom: 2 }}>×</button>
                     )}
                   </div>
                   <div style={{ display: 'flex', gap: 8 }}>
@@ -224,27 +219,43 @@ export default function ProviderCard({ name, provider, onSave, onDelete }: Props
                       <label>上下文窗口</label>
                       <input
                         placeholder="例如: 128000"
-                        value={e.contextWindow}
-                        onChange={ev => updateEntry(i, 'contextWindow', ev.target.value)}
+                        value={entry.contextWindow}
+                        onChange={ev => updateEntry(idx, 'contextWindow', ev.target.value)}
                       />
                     </div>
                     <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
                       <label>最大输出 Token</label>
                       <input
                         placeholder="例如: 4096"
-                        value={e.maxOutputTokens}
-                        onChange={ev => updateEntry(i, 'maxOutputTokens', ev.target.value)}
+                        value={entry.maxOutputTokens}
+                        onChange={ev => updateEntry(idx, 'maxOutputTokens', ev.target.value)}
                       />
                     </div>
                   </div>
                   <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 4, marginTop: 8 }}>
                     <input
                       type="checkbox"
-                      checked={e.supportsToolUse}
-                      onChange={ev => updateEntry(i, 'supportsToolUse', ev.target.checked)}
+                      checked={entry.supportsToolUse}
+                      onChange={ev => updateEntry(idx, 'supportsToolUse', ev.target.checked)}
                     />
                     支持 Tool Use
                   </label>
+                  <div className="test-connection-area" style={{ marginTop: 8 }}>
+                    <button
+                      className={`test-connection-btn ${testStates[idx] === 'testing' ? 'testing' : ''}`}
+                      disabled={testStates[idx] === 'testing' || !form.authToken || !entry.name.trim()}
+                      onClick={() => handleTestConnection(idx)}
+                    >
+                      {testStates[idx] === 'testing' ? '测试中...' : '测试连接'}
+                    </button>
+                    {testResults[idx] && testStates[idx] !== 'testing' && (
+                      <span className={`test-connection-result ${testResults[idx].success ? 'success' : 'error'} ${fadingModels[idx] ? 'fading' : ''}`}>
+                        {testResults[idx].success
+                          ? `连接正常 (${testResults[idx].clientTest.latencyMs}ms)`
+                          : DIAGNOSIS_CN[testResults[idx].diagnosis] || testResults[idx].diagnosis}
+                      </span>
+                    )}
+                  </div>
                 </div>
               ))}
               <button className="btn btn-sm" onClick={addEntry} style={{ marginTop: 4 }}>
@@ -253,22 +264,8 @@ export default function ProviderCard({ name, provider, onSave, onDelete }: Props
             </div>
           )}
 
-          <div className="test-connection-area">
+          <div style={{ marginTop: 16 }}>
             <button className="btn btn-primary" onClick={handleSave}>保存</button>
-            <button
-              className={`test-connection-btn ${testState === 'testing' ? 'testing' : ''}`}
-              disabled={testState === 'testing' || !form.authToken}
-              onClick={handleTestConnection}
-            >
-              {testState === 'testing' ? '测试中...' : '测试连接'}
-            </button>
-            {testResult && testState !== 'testing' && (
-              <span className={`test-connection-result ${testResult.success ? 'success' : 'error'} ${fading ? 'fading' : ''}`}>
-                {testResult.success
-                  ? `连接正常 (${testResult.clientTest.latencyMs}ms)`
-                  : DIAGNOSIS_CN[testResult.diagnosis] || testResult.diagnosis}
-              </span>
-            )}
           </div>
         </>
       ) : (
