@@ -43,14 +43,7 @@ function getChatEndpoint(baseUrl: string, protocol: 'anthropic' | 'openai'): str
   return `${base}/v1/chat/completions`;
 }
 
-function buildHttpRequestBody(protocol: 'anthropic' | 'openai', model: string): string {
-  if (protocol === 'anthropic') {
-    return JSON.stringify({
-      model,
-      max_tokens: 1,
-      messages: [{ role: 'user', content: 'Hi' }],
-    });
-  }
+function buildHttpRequestBody(model: string): string {
   return JSON.stringify({
     model,
     max_tokens: 1,
@@ -88,24 +81,23 @@ function timeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 async function runHttpTest(input: TestConnectionInput): Promise<LayerTestResult> {
   const started = Date.now();
   const endpoint = getChatEndpoint(input.baseUrl, input.protocol);
-  const body = buildHttpRequestBody(input.protocol, input.model);
+  const body = buildHttpRequestBody(input.model);
   const headers = input.protocol === 'anthropic'
     ? getAnthropicHeaders(input.apiKey)
     : getAuthHeader(input.apiKey);
 
   const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
 
   try {
-    const response = await timeout(
-      fetch(endpoint, {
-        method: 'POST',
-        headers,
-        body,
-        signal: controller.signal,
-      }),
-      10_000
-    );
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers,
+      body,
+      signal: controller.signal,
+    });
 
+    clearTimeout(timer);
     const latencyMs = Date.now() - started;
 
     if (!response.ok) {
@@ -120,7 +112,7 @@ async function runHttpTest(input: TestConnectionInput): Promise<LayerTestResult>
 
     return { success: true, latencyMs };
   } catch (err: any) {
-    controller.abort();
+    clearTimeout(timer);
     return {
       success: false,
       latencyMs: Date.now() - started,
@@ -149,7 +141,7 @@ async function runClientTest(input: TestConnectionInput): Promise<LayerTestResul
       : new AnthropicAdapter(providerConfig);
 
     await timeout(
-      adapter.chat([{ role: 'user', content: 'Hi' }], { maxTokens: 1 }),
+      adapter.chat([{ role: 'user', content: 'Hi' }], { model: input.model, maxTokens: 1 }),
       10_000
     );
 
@@ -200,8 +192,10 @@ function diagnose(httpTest: LayerTestResult, clientTest: LayerTestResult): Diagn
 // ---- Main Export ----
 
 export async function testConnection(input: TestConnectionInput): Promise<TestConnectionResult> {
-  const httpTest = await runHttpTest(input);
-  const clientTest = await runClientTest(input);
+  const [httpTest, clientTest] = await Promise.all([
+    runHttpTest(input),
+    runClientTest(input),
+  ]);
   const diagnosis = diagnose(httpTest, clientTest);
 
   return {
