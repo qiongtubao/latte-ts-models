@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ProviderConfig, ModelConfig } from '../../api/config';
+import { ProviderConfig, ModelConfig, TestConnectionResult, configApi } from '../../api/config';
 
 interface Props {
   onAdd: (name: string, provider: ProviderConfig) => void;
@@ -33,6 +33,9 @@ export default function AddProviderModal({ onAdd, onClose }: Props) {
   const [modelEntries, setModelEntries] = useState<ModelEntry[]>([
     { name: '', contextWindow: '', maxOutputTokens: '', supportsToolUse: false },
   ]);
+  const [testState, setTestState] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
+  const [testResult, setTestResult] = useState<TestConnectionResult | null>(null);
+  const [fading, setFading] = useState(false);
 
   const updateEntry = (i: number, field: keyof ModelEntry, value: string | boolean) => {
     setModelEntries(prev => prev.map((e, idx) => idx === i ? { ...e, [field]: value } : e));
@@ -44,6 +47,51 @@ export default function AddProviderModal({ onAdd, onClose }: Props) {
 
   const removeEntry = (i: number) => {
     setModelEntries(prev => prev.filter((_, idx) => idx !== i));
+  };
+
+  const DIAGNOSIS_CN: Record<string, string> = {
+    all_pass: '连接正常，可以开始使用',
+    connectivity_or_auth_failed: '无法连接，请检查网络和 API Key 是否正确',
+    rate_limited: '连接正常但触发频率限制，请稍后重试',
+    content_policy_blocked: '连接正常但被内容安全策略拦截',
+    client_layer_error: '网络和凭证正常，但内部处理异常，请联系技术支持',
+  };
+
+  const getTestModel = (): string => {
+    if (modelsMode === 'simple') {
+      const first = modelsStr.split(',').map(s => s.trim()).filter(Boolean)[0];
+      return first || 'default';
+    }
+    const first = modelEntries.find(e => e.name.trim());
+    return first?.name.trim() || 'default';
+  };
+
+  const handleTestConnection = async () => {
+    const model = getTestModel();
+    setTestState('testing');
+    setTestResult(null);
+    setFading(false);
+    try {
+      const result = await configApi.testConnection({
+        baseUrl: baseURL,
+        apiKey: authToken,
+        protocol,
+        model,
+      });
+      setTestResult(result);
+      setTestState(result.success ? 'success' : 'error');
+      if (result.success) {
+        setTimeout(() => setFading(true), 3000);
+      }
+    } catch (err: any) {
+      setTestResult({
+        success: false,
+        httpTest: { success: false, latencyMs: 0, error: err.message },
+        clientTest: { success: false, latencyMs: 0, error: err.message },
+        diagnosis: 'connectivity_or_auth_failed',
+      });
+      setTestState('error');
+    }
   };
 
   const handleSubmit = () => {
@@ -190,9 +238,23 @@ export default function AddProviderModal({ onAdd, onClose }: Props) {
           </div>
         )}
 
-        <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+        <div className="test-connection-area" style={{ marginTop: 16 }}>
           <button className="btn btn-primary" onClick={handleSubmit}>添加</button>
           <button className="btn" onClick={onClose}>取消</button>
+          <button
+            className={`test-connection-btn ${testState === 'testing' ? 'testing' : ''}`}
+            disabled={testState === 'testing' || !authToken}
+            onClick={handleTestConnection}
+          >
+            {testState === 'testing' ? '测试中...' : '测试连接'}
+          </button>
+          {testResult && testState !== 'testing' && (
+            <span className={`test-connection-result ${testResult.success ? 'success' : 'error'} ${fading ? 'fading' : ''}`}>
+              {testResult.success
+                ? `连接正常 (${testResult.clientTest.latencyMs}ms)`
+                : DIAGNOSIS_CN[testResult.diagnosis] || testResult.diagnosis}
+            </span>
+          )}
         </div>
       </div>
     </div>
