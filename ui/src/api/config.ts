@@ -40,6 +40,20 @@ export interface JudgeConfig {
   dimensions: string[];
 }
 
+export interface LayerTestResult {
+  success: boolean;
+  latencyMs: number;
+  error?: string;
+  statusCode?: number;
+}
+
+export interface TestConnectionResult {
+  success: boolean;
+  httpTest: LayerTestResult;
+  clientTest: LayerTestResult;
+  diagnosis: string;
+}
+
 export const configApi = {
   getGlobal: () => request<ConfigFile>('/config/global'),
   getProject: () => request<ConfigFile>('/config/project'),
@@ -56,4 +70,13 @@ export const configApi = {
   getJudge: () => request<JudgeConfig>('/config/judge'),
   setJudge: (judge: JudgeConfig) =>
     request('/config/judge', { method: 'PUT', body: JSON.stringify(judge) }),
+  testConnection: (data: {
+    baseUrl: string;
+    apiKey: string;
+    protocol: 'anthropic' | 'openai';
+    model: string;
+  }) => request<TestConnectionResult>('/config/test-connection', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  }),
 };
